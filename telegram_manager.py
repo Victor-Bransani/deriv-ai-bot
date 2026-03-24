@@ -155,6 +155,65 @@ async def handle_api_trades(request: web.Request) -> web.Response:
     return web.json_response(markers)
 
 
+def _coerce_csv_cell(v: Optional[str]) -> Any:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        if "." in s or "e" in low:
+            return float(s)
+        return int(s)
+    except ValueError:
+        return s
+
+
+def cycle_row_to_json(row: Dict[str, str]) -> Dict[str, Any]:
+    return {str(k): _coerce_csv_cell(v) for k, v in row.items() if k is not None}
+
+
+def find_latest_cycle_row_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Usa o ficheiro cycles_*.csv mais recente (por nome YYYY-MM-DD) e procura
+    a última linha com symbol_deriv igual a symbol (iteração do fim para o início).
+    """
+    data_dir = dashboard_data_dir()
+    if not data_dir.is_dir():
+        return None
+    paths = sorted(data_dir.glob("cycles_*.csv"), key=lambda p: p.name, reverse=True)
+    if not paths:
+        return None
+    latest = paths[0]
+    sym = symbol.strip()
+    try:
+        with latest.open("r", encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        logger.warning("Ler último cycle CSV %s: %s", latest, e)
+        return None
+    for row in reversed(rows):
+        if (row.get("symbol_deriv") or "").strip() == sym:
+            return cycle_row_to_json(row)
+    return None
+
+
+async def handle_api_cycle(request: web.Request) -> web.Response:
+    sym = request.rel_url.query.get("symbol", "").strip()
+    if not sym:
+        return web.json_response({"detail": "parâmetro symbol obrigatório"}, status=400)
+    row = find_latest_cycle_row_for_symbol(sym)
+    if row is None:
+        return web.json_response(
+            {"detail": "sem linha para este símbolo ou CSV ausente"},
+            status=404,
+        )
+    return web.json_response(row)
+
+
 def _chat_allowed(update: Update) -> bool:
     if not update.effective_chat:
         return False
@@ -363,13 +422,14 @@ async def run_manager() -> None:
     web_app.router.add_post("/alert", handle_alert)
     web_app.router.add_get("/dashboard", handle_dashboard)
     web_app.router.add_get("/api/trades", handle_api_trades)
+    web_app.router.add_get("/api/cycle", handle_api_cycle)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(
-        "Gestor HTTP 0.0.0.0:%s — POST /alert · GET /dashboard · GET /api/trades",
+        "Gestor HTTP 0.0.0.0:%s — POST /alert · GET /dashboard · GET /api/trades · GET /api/cycle",
         port,
     )
 

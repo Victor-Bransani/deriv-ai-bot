@@ -100,6 +100,7 @@
       padding: 1rem 1.5rem 1.5rem;
     }
     #chart-wrap {
+      position: relative;
       height: calc(100vh - 88px);
       min-height: 420px;
       border-radius: 12px;
@@ -109,6 +110,69 @@
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
     }
     #chart { width: 100%; height: 100%; }
+    #ai-panel {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 10;
+      width: min(320px, calc(100% - 24px));
+      max-height: calc(100% - 24px);
+      overflow: auto;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(12, 16, 28, 0.58);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(18px) saturate(140%);
+      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      font-family: "JetBrains Mono", monospace;
+      pointer-events: none;
+    }
+    #ai-panel .ai-panel__title {
+      font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: rgba(180, 220, 255, 0.95);
+      text-shadow: 0 0 18px rgba(88, 166, 255, 0.45);
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    #ai-panel dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 12px;
+      font-size: 0.72rem;
+      align-items: baseline;
+    }
+    #ai-panel dt {
+      color: rgba(139, 148, 158, 0.95);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    #ai-panel dd {
+      color: #7ee787;
+      text-shadow: 0 0 12px rgba(126, 231, 135, 0.25);
+      word-break: break-word;
+      margin: 0;
+      line-height: 1.35;
+    }
+    #ai-panel dd.ai-reason {
+      color: #79c0ff;
+      text-shadow: 0 0 14px rgba(121, 192, 255, 0.2);
+      grid-column: 1 / -1;
+      margin-top: 4px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.68rem;
+      max-height: 7.5em;
+      overflow-y: auto;
+    }
     footer {
       padding: 0.5rem 1.5rem;
       font-size: 0.7rem;
@@ -134,9 +198,28 @@
     <p id="status">A ligar…</p>
   </header>
   <main>
-    <div id="chart-wrap"><div id="chart"></div></div>
+    <div id="chart-wrap">
+      <aside id="ai-panel" aria-label="Painel de IA">
+        <div class="ai-panel__title">Painel de IA</div>
+        <dl>
+          <dt>Fase atual</dt>
+          <dd id="ai-phase">—</dd>
+          <dt>Sinal</dt>
+          <dd id="ai-signal">—</dd>
+          <dt>RSI (M5)</dt>
+          <dd id="ai-rsi">—</dd>
+          <dt>Maré (M15)</dt>
+          <dd id="ai-tide">—</dd>
+          <dt>OBI</dt>
+          <dd id="ai-obi">—</dd>
+          <dt>Motivo</dt>
+          <dd id="ai-reason" class="ai-reason">—</dd>
+        </dl>
+      </aside>
+      <div id="chart"></div>
+    </div>
   </main>
-  <footer>Lightweight Charts · WebSocket Deriv · Trades via /api/trades (5s)</footer>
+  <footer>Lightweight Charts · WebSocket Deriv · /api/trades (5s) · /api/cycle (2s)</footer>
 
   <script>
 (function () {
@@ -172,15 +255,88 @@
     wickDownColor: "#ef5350",
   });
 
+  const emaSeries = chart.addLineSeries({
+    color: "#f5a623",
+    lineWidth: 2,
+    priceLineVisible: false,
+    lastValueVisible: true,
+    crosshairMarkerVisible: true,
+  });
+
+  const barsByTime = new Map();
+
   let ws = null;
   let reqId = 1;
   let tradePoll = null;
+  let cyclePoll = null;
 
   function nextId() { return reqId++; }
 
   function parseNum(v) {
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : NaN;
+  }
+
+  /** EMA de `period` velas: primeiro valor = SMA(period), depois fórmula clássica. */
+  function computeEmaSeriesPoints(bars, period) {
+    if (!bars.length || bars.length < period) return [];
+    const k = 2 / (period + 1);
+    let ema = 0;
+    for (let i = 0; i < period; i++) ema += bars[i].close;
+    ema /= period;
+    const out = [{ time: bars[period - 1].time, value: ema }];
+    for (let i = period; i < bars.length; i++) {
+      ema = bars[i].close * k + ema * (1 - k);
+      out.push({ time: bars[i].time, value: ema });
+    }
+    return out;
+  }
+
+  function refreshEmaLine() {
+    const bars = Array.from(barsByTime.values()).sort(function (a, b) { return a.time - b.time; });
+    const pts = computeEmaSeriesPoints(bars, 20);
+    emaSeries.setData(pts);
+  }
+
+  function fmtAi(v) {
+    if (v === null || v === undefined || v === "") return "—";
+    if (typeof v === "boolean") return v ? "sim" : "não";
+    if (typeof v === "number" && Number.isFinite(v)) {
+      if (Number.isInteger(v)) return String(v);
+      var s = v.toFixed(5);
+      return s.replace(/\.?0+$/, "");
+    }
+    return String(v);
+  }
+
+  function setAiPanelPlaceholder() {
+    document.getElementById("ai-phase").textContent = "—";
+    document.getElementById("ai-signal").textContent = "—";
+    document.getElementById("ai-rsi").textContent = "—";
+    document.getElementById("ai-tide").textContent = "—";
+    document.getElementById("ai-obi").textContent = "—";
+    document.getElementById("ai-reason").textContent = "—";
+  }
+
+  async function fetchCycle() {
+    var sym = symbolSelect.value;
+    try {
+      var r = await fetch("/api/cycle?symbol=" + encodeURIComponent(sym), { cache: "no-store" });
+      if (r.status === 404) {
+        setAiPanelPlaceholder();
+        return;
+      }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      var d = await r.json();
+      document.getElementById("ai-phase").textContent = fmtAi(d.phase);
+      document.getElementById("ai-signal").textContent = fmtAi(d.signal);
+      document.getElementById("ai-rsi").textContent = fmtAi(d.rsi_m5);
+      document.getElementById("ai-tide").textContent = fmtAi(d.m15_tide);
+      document.getElementById("ai-obi").textContent = fmtAi(d.obi);
+      document.getElementById("ai-reason").textContent = fmtAi(d.reason);
+    } catch (e) {
+      console.warn("api/cycle", e);
+    }
   }
 
   function candleToBar(c) {
@@ -202,7 +358,10 @@
     const seen = new Map();
     for (const b of bars) seen.set(b.time, b);
     const merged = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+    barsByTime.clear();
+    for (const b of merged) barsByTime.set(b.time, b);
     series.setData(merged);
+    refreshEmaLine();
     chart.timeScale().fitContent();
   }
 
@@ -217,7 +376,11 @@
       low: ohlc.low,
       close: ohlc.close,
     });
-    if (bar) series.update(bar);
+    if (bar) {
+      barsByTime.set(bar.time, bar);
+      series.update(bar);
+      refreshEmaLine();
+    }
   }
 
   function send(obj) {
@@ -327,6 +490,8 @@
 
   symbolSelect.addEventListener("change", function () {
     connect(symbolSelect.value);
+    setAiPanelPlaceholder();
+    fetchCycle();
   });
 
   window.addEventListener("resize", function () {
@@ -341,6 +506,8 @@
   connect(symbolSelect.value);
   tradePoll = setInterval(fetchTrades, 5000);
   fetchTrades();
+  cyclePoll = setInterval(fetchCycle, 2000);
+  fetchCycle();
 })();
   </script>
 </body>

@@ -27,7 +27,9 @@ class DerivClient:
 
     WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id={}"
 
-    def __init__(self) -> None:
+    def __init__(self, auth_symbol: Optional[str] = None) -> None:
+        # Símbolo UI ou Deriv usado só para escolher DERIV_TOKEN_V## vs DERIV_TOKEN no authorize.
+        self._auth_symbol = (auth_symbol or config.ACTIVE_SYMBOL or "V75").strip()
         self._ws: Optional[Any] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._req_id = 1
@@ -194,9 +196,31 @@ class DerivClient:
         return await self._send_request(payload, timeout=timeout)
 
     async def authorize(self) -> None:
-        if not config.DERIV_TOKEN:
-            raise DerivClientError("DERIV_TOKEN não configurado")
-        resp = await self._send_request({"authorize": config.DERIV_TOKEN})
+        token = config.get_deriv_token_for_symbol(self._auth_symbol)
+        if not token:
+            raise DerivClientError(
+                f"Token Deriv ausente para ativo {self._auth_symbol!r} "
+                "(defina DERIV_TOKEN ou o DERIV_TOKEN_V## correspondente)"
+            )
+        master = (config.DERIV_TOKEN or "").strip()
+        vol_key = config.normalized_volatility_symbol(self._auth_symbol)
+        using = "específico" if token != master else "principal (DERIV_TOKEN)"
+        logger.info(
+            "Deriv authorize: ativo=%s vol_key=%s origem=%s",
+            self._auth_symbol,
+            vol_key or "—",
+            using,
+        )
+        try:
+            resp = await self._send_request({"authorize": token})
+        except DerivClientError as e:
+            logger.error(
+                "Falha authorize Deriv (ativo=%s, origem=%s): %s",
+                self._auth_symbol,
+                using,
+                e,
+            )
+            raise
         if "authorize" not in resp:
             raise DerivClientError(f"Falha authorize: {resp}")
         self.authorized = True

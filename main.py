@@ -62,7 +62,6 @@ class DerivAIBot:
 
     def __init__(self) -> None:
         self.notifier = Notifier()
-        self.deriv = DerivClient()
         self.ai = AIEngine()
         self.risk = RiskManager()
         self._stop = asyncio.Event()
@@ -80,6 +79,8 @@ class DerivAIBot:
             "last_signal": "WAIT",
             "last_confidence": 0.0,
         }
+        # Um token WS por mercado (DERIV_TOKEN_V##); alinhado ao ativo deste operário.
+        self.deriv = DerivClient(auth_symbol=self.state["symbol"])
         self._stats_day: Optional[datetime.date] = None
 
     def _deriv_symbol(self) -> str:

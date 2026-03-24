@@ -1,35 +1,26 @@
 import { useEffect, useRef, useCallback } from "react";
 import {
   createChart,
+  createSeriesMarkers,
   CrosshairMode,
+  HistogramSeries,
+  LineSeries,
+  LineStyle,
+  CandlestickSeries,
+  ColorType,
   type IChartApi,
   type ISeriesApi,
   type CandlestickData,
-  type LineData,
   type SeriesMarker,
   type Time,
-  ColorType,
-  CandlestickSeries,
-  LineSeries,
 } from "lightweight-charts";
-import AILogsPanel from "@/components/dashboard/AILogsPanel";
+import { computeEma, computeMacd, computeRsi, computeSma } from "@/lib/chartIndicators";
+import { apiUrl } from "@/lib/apiBase";
+import { chartMainPriceFormat } from "@/lib/priceFormat";
 
+const SMA_PERIOD = 20;
 const EMA_PERIOD = 20;
-/** Multiplicador EMA: 2 / (period + 1) */
-const EMA_MULT = 2 / (EMA_PERIOD + 1);
-
-function computeEmaLineData(bars: CandlestickData[]): LineData[] {
-  if (bars.length < EMA_PERIOD) return [];
-  let ema = 0;
-  for (let i = 0; i < EMA_PERIOD; i++) ema += bars[i].close;
-  ema /= EMA_PERIOD;
-  const out: LineData[] = [{ time: bars[EMA_PERIOD - 1].time, value: ema }];
-  for (let i = EMA_PERIOD; i < bars.length; i++) {
-    ema = bars[i].close * EMA_MULT + ema * (1 - EMA_MULT);
-    out.push({ time: bars[i].time, value: ema });
-  }
-  return out;
-}
+const RSI_PERIOD = 14;
 
 interface TradeMarkerRow {
   time: Time;
@@ -44,13 +35,23 @@ interface TradingChartProps {
   symbol: string;
 }
 
+function lastOrUndefined<T>(arr: T[]): T | undefined {
+  return arr.length ? arr[arr.length - 1] : undefined;
+}
+
 const TradingChart = ({ candles, symbol }: TradingChartProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const smaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const emaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-  /** Após histórico completo (p.ex. troca de símbolo); próximas atualizações OHLC usam scroll ao tempo real. */
+  const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const macdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdSignalRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const tradeMarkersRef = useRef<ReturnType<typeof createSeriesMarkers> | null>(null);
   const expectHistoryFitRef = useRef(true);
+  const prevCandlesRef = useRef<CandlestickData[]>([]);
 
   const initChart = useCallback(() => {
     if (!containerRef.current) return;
@@ -59,7 +60,13 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
       chartRef.current.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      smaSeriesRef.current = null;
       emaSeriesRef.current = null;
+      rsiSeriesRef.current = null;
+      macdHistRef.current = null;
+      macdLineRef.current = null;
+      macdSignalRef.current = null;
+      tradeMarkersRef.current = null;
     }
 
     const el = containerRef.current;
@@ -82,12 +89,31 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
         borderColor: "#2a2e39",
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: 12,
+        fixLeftEdge: false,
+        fixRightEdge: false,
       },
-      handleScale: { axisPressedMouseMove: true },
-      handleScroll: { vertTouchDrag: true },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        mouseWheel: true,
+        pinch: true,
+        axisDoubleClickReset: true,
+      },
+      kineticScroll: {
+        touch: true,
+        mouse: true,
+      },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
+      priceScaleId: "right",
+      priceFormat: chartMainPriceFormat,
       upColor: "#26a69a",
       downColor: "#ef5350",
       borderVisible: false,
@@ -95,7 +121,19 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
       wickDownColor: "#ef5350",
     });
 
+    const smaSeries = chart.addSeries(LineSeries, {
+      priceScaleId: "right",
+      priceFormat: chartMainPriceFormat,
+      color: "#38bdf8",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+    });
+
     const emaSeries = chart.addSeries(LineSeries, {
+      priceScaleId: "right",
+      priceFormat: chartMainPriceFormat,
       color: "#fbbf24",
       lineWidth: 2,
       priceLineVisible: false,
@@ -103,9 +141,84 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
       crosshairMarkerVisible: true,
     });
 
+    const rsiSeries = chart.addSeries(LineSeries, {
+      priceScaleId: "rsi",
+      color: "#c084fc",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+      autoscaleInfoProvider: () => ({
+        priceRange: { minValue: 0, maxValue: 100 },
+      }),
+    });
+
+    rsiSeries.createPriceLine({
+      price: 70,
+      color: "rgba(248, 113, 113, 0.45)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: "70",
+    });
+    rsiSeries.createPriceLine({
+      price: 30,
+      color: "rgba(74, 222, 128, 0.45)",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: "30",
+    });
+
+    const macdHist = chart.addSeries(HistogramSeries, {
+      priceScaleId: "macd",
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    const macdLine = chart.addSeries(LineSeries, {
+      priceScaleId: "macd",
+      color: "#3b82f6",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+
+    const macdSignal = chart.addSeries(LineSeries, {
+      priceScaleId: "macd",
+      color: "#fb923c",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+
+    // scaleMargins: top+bottom < 1. RSI: top 0,65 + bottom 0,75 > 1 na API — bottom 0,22 ~ faixa estreita ~13%.
+    chart.priceScale("right").applyOptions({
+      scaleMargins: { top: 0.05, bottom: 0.35 },
+      borderVisible: true,
+      borderColor: "#2a2e39",
+    });
+    chart.priceScale("rsi").applyOptions({
+      scaleMargins: { top: 0.65, bottom: 0.22 },
+      borderVisible: true,
+      borderColor: "#2a2e39",
+    });
+    chart.priceScale("macd").applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0.02 },
+      borderVisible: true,
+      borderColor: "#2a2e39",
+    });
+
+    tradeMarkersRef.current = createSeriesMarkers(candleSeries, []);
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
+    smaSeriesRef.current = smaSeries;
     emaSeriesRef.current = emaSeries;
+    rsiSeriesRef.current = rsiSeries;
+    macdHistRef.current = macdHist;
+    macdLineRef.current = macdLine;
+    macdSignalRef.current = macdSignal;
   }, []);
 
   useEffect(() => {
@@ -129,26 +242,81 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
         chartRef.current.remove();
         chartRef.current = null;
         candleSeriesRef.current = null;
+        smaSeriesRef.current = null;
         emaSeriesRef.current = null;
+        rsiSeriesRef.current = null;
+        macdHistRef.current = null;
+        macdLineRef.current = null;
+        macdSignalRef.current = null;
+        tradeMarkersRef.current = null;
       }
     };
   }, [initChart]);
 
   useEffect(() => {
     const c = candleSeriesRef.current;
-    const e = emaSeriesRef.current;
-    if (!c || !e) return;
+    const sma = smaSeriesRef.current;
+    const ema = emaSeriesRef.current;
+    const rsi = rsiSeriesRef.current;
+    const mh = macdHistRef.current;
+    const ml = macdLineRef.current;
+    const ms = macdSignalRef.current;
+    if (!c || !sma || !ema || !rsi || !mh || !ml || !ms) return;
 
     if (candles.length === 0) {
       c.setData([]);
-      e.setData([]);
-      c.setMarkers([]);
+      sma.setData([]);
+      ema.setData([]);
+      rsi.setData([]);
+      mh.setData([]);
+      ml.setData([]);
+      ms.setData([]);
+      tradeMarkersRef.current?.setMarkers([]);
       expectHistoryFitRef.current = true;
+      prevCandlesRef.current = [];
       return;
     }
 
-    c.setData(candles);
-    e.setData(computeEmaLineData(candles));
+    const prev = prevCandlesRef.current;
+    const lastBar = candles[candles.length - 1];
+    const prevLast = lastOrUndefined(prev);
+    const incremental =
+      prev.length === candles.length &&
+      prevLast !== undefined &&
+      lastBar !== undefined &&
+      prevLast.time === lastBar.time;
+
+    const smaD = computeSma(candles, SMA_PERIOD);
+    const emaD = computeEma(candles, EMA_PERIOD);
+    const rsiD = computeRsi(candles, RSI_PERIOD);
+    const macd = computeMacd(candles, 12, 26, 9);
+
+    if (incremental) {
+      c.update(lastBar);
+      const ls = lastOrUndefined(smaD);
+      const le = lastOrUndefined(emaD);
+      const lr = lastOrUndefined(rsiD);
+      const lmh = lastOrUndefined(macd.histogram);
+      const lml = lastOrUndefined(macd.line);
+      const lms = lastOrUndefined(macd.signal);
+      if (ls) sma.update(ls);
+      if (le) ema.update(le);
+      if (lr) rsi.update(lr);
+      if (lmh) mh.update(lmh);
+      if (lml) ml.update(lml);
+      if (lms) ms.update(lms);
+    } else {
+      c.setData(candles);
+      sma.setData(smaD);
+      ema.setData(emaD);
+      rsi.setData(rsiD);
+      mh.setData(macd.histogram);
+      ml.setData(macd.line);
+      ms.setData(macd.signal);
+    }
+
+    prevCandlesRef.current = candles;
+
     const ts = chartRef.current?.timeScale();
     if (ts) {
       if (expectHistoryFitRef.current) {
@@ -161,25 +329,24 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
   }, [candles]);
 
   useEffect(() => {
-    const c = candleSeriesRef.current;
-    if (c) c.setMarkers([]);
+    tradeMarkersRef.current?.setMarkers([]);
     expectHistoryFitRef.current = true;
+    prevCandlesRef.current = [];
   }, [symbol]);
 
   useEffect(() => {
-    const c = candleSeriesRef.current;
-    if (!c) return;
+    if (!tradeMarkersRef.current) return;
 
     let cancelled = false;
 
     const fetchTrades = async () => {
       try {
-        const r = await fetch(`/api/trades?symbol=${encodeURIComponent(symbol)}`, {
+        const r = await fetch(apiUrl(`/api/trades?symbol=${encodeURIComponent(symbol)}`), {
           cache: "no-store",
         });
         if (cancelled || !r.ok) return;
         const data = (await r.json()) as TradeMarkerRow[];
-        if (!Array.isArray(data) || !candleSeriesRef.current) return;
+        if (!Array.isArray(data) || !tradeMarkersRef.current) return;
         const markers: SeriesMarker<Time>[] = data.map((m) => ({
           time: m.time,
           position: m.position,
@@ -187,7 +354,7 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
           shape: m.shape,
           text: m.text,
         }));
-        candleSeriesRef.current.setMarkers(markers);
+        tradeMarkersRef.current.setMarkers(markers);
       } catch {
         /* ignore */
       }
@@ -202,11 +369,11 @@ const TradingChart = ({ candles, symbol }: TradingChartProps) => {
   }, [symbol]);
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border bg-[#131722] shadow-2xl shadow-black/30">
-      <AILogsPanel currentSymbol={symbol} />
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border border-border bg-[#131722] shadow-2xl shadow-black/30">
       <div
         ref={containerRef}
-        className="h-[calc(100vh-220px)] min-h-[400px] w-full md:h-[calc(100vh-180px)]"
+        className="min-h-[600px] w-full flex-1 lg:min-h-[640px]"
+        style={{ height: "max(600px, 80vh)" }}
       />
       {candles.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">

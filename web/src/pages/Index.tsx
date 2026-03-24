@@ -4,6 +4,9 @@ import { Activity, BarChart3 } from "lucide-react";
 import MarketSelector from "@/components/dashboard/MarketSelector";
 import StatusIndicator from "@/components/dashboard/StatusIndicator";
 import PriceDisplay from "@/components/dashboard/PriceDisplay";
+import AILogsPanel from "@/components/dashboard/AILogsPanel";
+import InstitutionalKpiBar from "@/components/dashboard/InstitutionalKpiBar";
+import TradeHistoryPanel from "@/components/dashboard/TradeHistoryPanel";
 import TradingChart from "@/components/dashboard/TradingChart";
 import { useDeriv } from "@/hooks/useDeriv";
 
@@ -48,6 +51,8 @@ const Index = () => {
 
       {/* Main */}
       <main className="container py-4">
+        <InstitutionalKpiBar />
+
         {/* Price Bar */}
         <motion.div
           initial={{ opacity: 0, y: -10 }}
@@ -63,20 +68,30 @@ const Index = () => {
           </div>
         </motion.div>
 
-        {/* Chart */}
+        {/* Terminal: gráfico + painel lateral (sem sobreposição) */}
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.1, duration: 0.4 }}
+          className="flex min-h-0 flex-col gap-4 lg:grid lg:grid-cols-12 lg:items-stretch lg:gap-4 lg:min-h-[min(82vh,calc(100vh-160px))]"
         >
-          <TradingChart candles={candles} symbol={market} />
+          <div className="flex min-h-0 flex-col lg:col-span-9">
+            <TradingChart candles={candles} symbol={market} />
+          </div>
+          <div className="min-h-[280px] shrink-0 lg:col-span-3 lg:min-h-[min(82vh,calc(100vh-160px))]">
+            <AILogsPanel currentSymbol={market} />
+          </div>
         </motion.div>
+
+        <div className="mt-6">
+          <TradeHistoryPanel />
+        </div>
       </main>
 
       {/* Footer */}
       <footer className="container py-3">
         <p className="text-xs text-muted-foreground font-mono text-center">
-          Lightweight Charts · ws.binaryws.com M5 · /api/trades (5s) · /api/cycle (2s)
+          Lightweight Charts · M5 · /api/stats · /api/history · /api/trades · /api/cycle
         </p>
       </footer>
     </div>

@@ -1,6 +1,8 @@
-import os
 import logging
+import os
+import re
 from pathlib import Path
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 
@@ -16,6 +18,56 @@ CHAT_ID = os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
 # ID numérico da aplicação em https://app.deriv.com / API settings (não use token ou string alfanumérica aqui).
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")
 DERIV_TOKEN = os.getenv("DERIV_TOKEN")
+
+
+def _env_token(name: str) -> Optional[str]:
+    v = (os.getenv(name) or "").strip()
+    return v if v else None
+
+
+# Tokens opcionais por volatilidade (um WebSocket / sessão por token — reduz rate limit em HFT).
+DERIV_TOKEN_V10 = _env_token("DERIV_TOKEN_V10")
+DERIV_TOKEN_V25 = _env_token("DERIV_TOKEN_V25")
+DERIV_TOKEN_V50 = _env_token("DERIV_TOKEN_V50")
+DERIV_TOKEN_V75 = _env_token("DERIV_TOKEN_V75")
+
+_DERIV_TOKEN_BY_VOL: Dict[str, Optional[str]] = {
+    "V10": DERIV_TOKEN_V10,
+    "V25": DERIV_TOKEN_V25,
+    "V50": DERIV_TOKEN_V50,
+    "V75": DERIV_TOKEN_V75,
+}
+
+
+def normalized_volatility_symbol(symbol: str) -> Optional[str]:
+    """
+    Normaliza símbolos tipo V10, R_10, R10, r_10_virtual → chave V10/V25/...
+    Apenas índices de volatilidade conhecidos; outros ativos devolvem None (usa fallback).
+    """
+    s = (symbol or "").strip().upper().replace(" ", "").replace("-", "_")
+    if not s:
+        return None
+    s = re.sub(r"_?VIRTUAL$", "", s)
+    m = re.fullmatch(r"R_?(\d+)", s)
+    if m:
+        return "V" + m.group(1)
+    m = re.fullmatch(r"V(\d+)", s)
+    if m:
+        return "V" + m.group(1)
+    return None
+
+
+def get_deriv_token_for_symbol(symbol: str) -> str:
+    """
+    Token WebSocket para o mercado dado. Usa DERIV_TOKEN_V10/V25/V50/V75 quando definidos;
+    caso contrário DERIV_TOKEN (chave mestra / dashboard).
+    """
+    key = normalized_volatility_symbol(symbol)
+    if key:
+        specific = _DERIV_TOKEN_BY_VOL.get(key)
+        if specific:
+            return specific
+    return (DERIV_TOKEN or "").strip()
 DERIV_DEMO = os.getenv("DERIV_DEMO", "true").strip().lower() in (
     "1",
     "true",

@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { TrendingUp, TrendingDown } from "lucide-react";
+import { formatPrice } from "@/lib/priceFormat";
 
 interface PriceDisplayProps {
   price: number | null;
@@ -26,7 +27,7 @@ const PriceDisplay = ({ price, previousPrice }: PriceDisplayProps) => {
           transition={{ duration: 0.2 }}
           className={`text-2xl md:text-3xl font-bold font-mono tabular-nums ${colorClass}`}
         >
-          {price.toFixed(2)}
+          {formatPrice(price)}
         </motion.span>
       </AnimatePresence>
       {direction !== "neutral" && (

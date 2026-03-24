@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 7%;
+    --foreground: 210 30% 92%;
+
+    --card: 220 18% 10%;
+    --card-foreground: 210 30% 92%;
+
+    --popover: 220 18% 10%;
+    --popover-foreground: 210 30% 92%;
+
+    --primary: 212 92% 62%;
+    --primary-foreground: 220 20% 7%;
+
+    --secondary: 220 16% 14%;
+    --secondary-foreground: 210 30% 92%;
+
+    --muted: 220 14% 16%;
+    --muted-foreground: 215 15% 58%;
+
+    --accent: 140 50% 45%;
+    --accent-foreground: 220 20% 7%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 30% 92%;
+
+    --border: 220 14% 20%;
+    --input: 220 14% 20%;
+    --ring: 212 92% 62%;
+
+    --radius: 0.75rem;
+
+    --chart-bg: 225 18% 9%;
+    --success: 140 50% 45%;
+    --danger: 0 72% 55%;
+    --warning: 38 92% 50%;
+
+    --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    --glow-primary: 0 0 24px hsl(212 92% 62% / 0.15);
+    --glow-success: 0 0 16px hsl(140 50% 45% / 0.2);
+    --glow-danger: 0 0 16px hsl(0 72% 55% / 0.2);
+
+    --sidebar-background: 220 18% 10%;
+    --sidebar-foreground: 210 30% 92%;
+    --sidebar-primary: 212 92% 62%;
+    --sidebar-primary-foreground: 220 20% 7%;
+    --sidebar-accent: 220 14% 16%;
+    --sidebar-accent-foreground: 210 30% 92%;
+    --sidebar-border: 220 14% 20%;
+    --sidebar-ring: 212 92% 62%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: hsl(var(--card) / 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .text-mono {
+    font-family: var(--font-mono);
+  }
+
+  .glow-primary {
+    box-shadow: var(--glow-primary);
+  }
+
+  .bg-gradient-radial {
+    background-image:
+      radial-gradient(ellipse 120% 80% at 50% -20%, hsl(var(--primary) / 0.08), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 100%, hsl(var(--success) / 0.04), transparent);
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}

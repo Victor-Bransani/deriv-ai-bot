@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -13,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class DerivClientError(Exception):
-    pass
+    """Erro da API Deriv; `raw_message` é a mensagem WebSocket completa quando disponível."""
+
+    def __init__(
+        self, message: str, *, raw_message: Optional[Dict[str, Any]] = None
+    ) -> None:
+        super().__init__(message)
+        self.raw_message = raw_message
 
 
 class DerivClient:
@@ -122,8 +128,11 @@ class DerivClient:
             if rid is not None and rid in self._pending:
                 fut = self._pending.pop(rid)
                 if not fut.done():
-                    fut.set_exception(DerivClientError(str(detail)))
-            logger.warning("Deriv error: %s", detail)
+                    fut.set_exception(
+                        DerivClientError(str(detail), raw_message=dict(msg))
+                    )
+            # Pode repetir com o try/except do proposal/buy; garante visibilidade em todos os pedidos.
+            logger.error("Deriv WS error (JSON completo): %s", json.dumps(msg, default=str))
             return
 
         poc = msg.get("proposal_open_contract")
@@ -198,37 +207,96 @@ class DerivClient:
         self.balance = bal
         return bal
 
-    async def buy_contract(
-        self, contract_type: str, stake: float, duration: int, symbol: str
-    ) -> Optional[Dict[str, Any]]:
-        proposal = await self.request(
-            {
-                "proposal": 1,
-                "amount": str(stake),
-                "basis": "stake",
-                "contract_type": contract_type,
-                "currency": "USD",
-                "duration": duration,
-                "duration_unit": config.DURATION_UNIT,
-                "symbol": symbol,
-            }
-        )
+    @staticmethod
+    def _multiplier_limit_order_numeric(stake: float) -> Dict[str, float]:
+        st = float(stake)
+        return {
+            "take_profit": round(st * config.TAKE_PROFIT_PCT, 2),
+            "stop_loss": round(st * config.STOP_LOSS_PCT, 2),
+        }
+
+    async def buy_multiplier_execute(
+        self, contract_type: str, stake: float, symbol: str
+    ) -> Optional[Tuple[int, float]]:
+        """
+        Envia proposal + buy para MULTUP/MULTDOWN (multiplicador).
+        Sem duration, sem cancellation fee; apenas TP/SL em limit_order (valores numéricos).
+        """
+        stake_amt = round(float(stake), 2)
+        proposal_payload: Dict[str, Any] = {
+            "proposal": 1,
+            "amount": stake_amt,
+            "basis": "stake",
+            "contract_type": contract_type,
+            "currency": config.CURRENCY,
+            "symbol": symbol,
+            "multiplier": int(config.MULTIPLIER),
+            "limit_order": self._multiplier_limit_order_numeric(stake_amt),
+        }
+
+        try:
+            proposal = await self.request(proposal_payload)
+        except DerivClientError as e:
+            if e.raw_message is not None:
+                logger.error(
+                    "proposal multiplicador — objeto JSON completo: %s",
+                    json.dumps(e.raw_message, default=str),
+                )
+            else:
+                logger.error("proposal multiplicador falhou: %s", e)
+            return None
+
         if "proposal" not in proposal:
-            logger.error("proposal error: %s", proposal)
+            logger.error(
+                "proposal multiplicador — resposta sem chave proposal: %s",
+                json.dumps(proposal, default=str),
+            )
             return None
         proposal_id = proposal["proposal"]["id"]
 
-        buy_resp = await self.request({"buy": proposal_id, "price": str(stake)})
+        buy_payload: Dict[str, Any] = {
+            "buy": proposal_id,
+            "price": stake_amt,
+        }
+        try:
+            buy_resp = await self.request(buy_payload)
+        except DerivClientError as e:
+            if e.raw_message is not None:
+                logger.error(
+                    "buy multiplicador — objeto JSON completo: %s",
+                    json.dumps(e.raw_message, default=str),
+                )
+            else:
+                logger.error("buy multiplicador falhou: %s", e)
+            return None
+
         if "buy" not in buy_resp:
-            logger.error("buy error: %s", buy_resp)
+            logger.error(
+                "buy multiplicador — resposta sem chave buy: %s",
+                json.dumps(buy_resp, default=str),
+            )
             return None
 
         contract_id = int(buy_resp["buy"]["contract_id"])
         buy_price = float(buy_resp["buy"]["buy_price"])
-        logger.info("Contrato comprado id=%s stake=%.2f", contract_id, buy_price)
+        logger.info(
+            "Multiplicador comprado id=%s tipo=%s mult=%s buy_price=%.2f",
+            contract_id,
+            contract_type,
+            config.MULTIPLIER,
+            buy_price,
+        )
+        return contract_id, buy_price
 
-        result = await self.wait_for_result(contract_id, buy_price)
-        return result
+    async def buy_contract(
+        self, contract_type: str, stake: float, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """Proposal + buy + espera até encerramento (TP/SL ou venda)."""
+        pair = await self.buy_multiplier_execute(contract_type, stake, symbol)
+        if not pair:
+            return None
+        contract_id, buy_price = pair
+        return await self.wait_for_result(contract_id, buy_price)
 
     async def wait_for_result(self, contract_id: int, buy_price: float) -> Dict[str, Any]:
         q: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -306,8 +374,15 @@ class DerivClient:
                 "profit": profit,
                 "buy_price": buy_price,
                 "won": profit > 0,
+                "settled": True,
             }
-        return {"contract_id": contract_id, "profit": 0.0, "buy_price": buy_price, "won": False}
+        return {
+            "contract_id": contract_id,
+            "profit": 0.0,
+            "buy_price": buy_price,
+            "won": False,
+            "settled": False,
+        }
 
     async def disconnect(self) -> None:
         self._closing = True

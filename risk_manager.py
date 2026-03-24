@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 import config
 import user_settings
-from kelly import TradeOutcome, compute_kelly_stake_fraction
+from kelly import TradeOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -125,83 +125,39 @@ class RiskManager:
             "day_open_balance": ref,
         }
 
-    def _fixed_fraction_stake(self, balance: float) -> float:
-        mn = user_settings.effective_float("min_stake", config.MIN_STAKE)
-        stake = balance * config.RISK_PER_TRADE
-        stake = max(mn, min(stake, config.MAX_STAKE))
-        return round(stake, 2)
-
     def calc_stake(self, balance: float) -> float:
+        """
+        stake = max(1.00, banca × MAX_STAKE_PCT), tipicamente 1% (mín. 1 USD na Deriv),
+        limitado a MAX_STAKE (teto de liquidez institucional).
+        """
         self._ensure_kelly_window()
         self._peak_balance = max(self._peak_balance, balance)
-        drawdown = 0.0
-        if self._peak_balance > 1e-12:
-            drawdown = 1.0 - (balance / self._peak_balance)
-
-        k_on = user_settings.effective_bool("kelly_enabled", config.KELLY_ENABLED)
-        k_min = user_settings.effective_int("kelly_min_trades", config.KELLY_MIN_TRADES)
-
-        if not k_on or len(self._kelly_history) < k_min:
-            self._last_kelly_meta = {
-                "mode": "warmup_fixed",
-                "n": len(self._kelly_history),
-                "min_needed": k_min,
-            }
-            return self._fixed_fraction_stake(balance)
-
-        f, meta = compute_kelly_stake_fraction(
-            self._kelly_history,
-            default_b=user_settings.effective_float(
-                "kelly_default_win_payoff", config.KELLY_DEFAULT_WIN_PAYOFF
-            ),
-            kelly_fraction=user_settings.effective_float(
-                "kelly_fraction", config.KELLY_FRACTION
-            ),
-            use_wilson_p=user_settings.effective_bool(
-                "kelly_use_wilson", config.KELLY_USE_WILSON
-            ),
-            alpha_prior=config.KELLY_PRIOR_WINS,
-            beta_prior=config.KELLY_PRIOR_LOSSES,
-            max_full_kelly=user_settings.effective_float(
-                "kelly_cap_full_fraction", config.KELLY_CAP_FULL_FRACTION
-            ),
-            drawdown=drawdown,
-            drawdown_soft_start=user_settings.effective_float(
-                "kelly_dd_soft_start", config.KELLY_DD_SOFT_START
-            ),
-            drawdown_min_scale=user_settings.effective_float(
-                "kelly_dd_min_scale", config.KELLY_DD_MIN_SCALE
-            ),
+        stake = max(1.0, float(balance) * float(config.MAX_STAKE_PCT))
+        stake = min(stake, float(config.MAX_STAKE))
+        self._last_kelly_meta = {
+            "mode": "fixed_max_stake_pct",
+            "max_stake_pct": config.MAX_STAKE_PCT,
+            "cap_max_stake": config.MAX_STAKE,
+        }
+        logger.info(
+            "Stake sniper: %.2f USD (banca %.2f × %.2f%% da banca, teto %.2f)",
+            round(stake, 2),
+            balance,
+            config.MAX_STAKE_PCT * 100.0,
+            config.MAX_STAKE,
         )
-        self._last_kelly_meta = meta
-
-        if f <= 0.0 or meta.get("edge") == "none_or_negative":
-            mn = user_settings.effective_float("min_stake", config.MIN_STAKE)
-            stake = max(
-                mn,
-                min(balance * config.RISK_PER_TRADE * 0.5, config.MAX_STAKE),
-            )
-            self._last_kelly_meta["fallback"] = "sem_margem_kelly"
-            return round(stake, 2)
-
-        max_f = user_settings.effective_float(
-            "kelly_max_bankroll_fraction", config.KELLY_MAX_BANKROLL_FRACTION
-        )
-        f = min(f, max_f)
-        mn = user_settings.effective_float("min_stake", config.MIN_STAKE)
-        stake = balance * f
-        stake = max(mn, min(stake, config.MAX_STAKE))
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Kelly stake meta: %s", self._last_kelly_meta)
-        else:
-            logger.info(
-                "Stake Kelly: f=%.4f banca, p=%s, b=%s, n=%s",
-                f,
-                meta.get("p_used"),
-                meta.get("b_hat"),
-                meta.get("n"),
-            )
         return round(stake, 2)
+
+    def record_ghost_trade_release(self, contract_id: int, stake: float) -> None:
+        """
+        Timeout de segurança: sem fechamento explícito via WS dentro do prazo.
+        Não altera sequência de perdas nem histórico Kelly; apenas liberta o ciclo.
+        """
+        logger.warning(
+            "Ghost trade: timeout WS contract_id=%s (stake ref=%.2f) — estado libertado, empate operacional",
+            contract_id,
+            stake,
+        )
 
     def record_trade(self, won, pnl, stake: float):
         self._ensure_kelly_window()

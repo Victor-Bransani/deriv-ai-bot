@@ -29,7 +29,9 @@ WS_REQUEST_TIMEOUT = float(os.getenv("WS_REQUEST_TIMEOUT", "60"))
 WS_CONTRACT_SUBSCRIBE_TIMEOUT = float(os.getenv("WS_CONTRACT_SUBSCRIBE_TIMEOUT", "30"))
 WS_RECONNECT_INITIAL_DELAY = float(os.getenv("WS_RECONNECT_INITIAL_DELAY", "2"))
 WS_RECONNECT_MAX_DELAY = float(os.getenv("WS_RECONNECT_MAX_DELAY", "60"))
-CONTRACT_RESULT_MAX_WAIT = int(os.getenv("CONTRACT_RESULT_MAX_WAIT", "120"))
+CONTRACT_RESULT_MAX_WAIT = int(os.getenv("CONTRACT_RESULT_MAX_WAIT", "7200"))
+# Trades “fantasma”: sem evento terminal no WS dentro deste tempo → libertar estado no bot
+GHOST_TRADE_TIMEOUT_SEC = float(os.getenv("GHOST_TRADE_TIMEOUT_SEC", "3600"))
 
 # Opcional: URL POST JSON para alertas (Discord/n8n/etc.)
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
@@ -44,16 +46,25 @@ AUTO_START_TRADING = os.getenv("AUTO_START_TRADING", "false").strip().lower() in
 
 ACTIVE_SYMBOL = "V75"
 STAKE_AMOUNT = 1.0
-MAX_STAKE = 10.0
-DURATION = 1            # duração do contrato (minutos)
-DURATION_UNIT = "m"     # "m" = minutos
+# Teto de liquidez/segurança (1% da banca até aqui; ex.: 50k × 1% = 500)
+MAX_STAKE = float(os.getenv("MAX_STAKE", "500.0"))
+CURRENCY = os.getenv("CURRENCY", "USD").strip().upper() or "USD"
+
+# Multiplicadores (MULTUP / MULTDOWN) — sem duração; TP/SL em valor monetário sobre a stake
+MULTIPLIER = int(os.getenv("MULTIPLIER", "100"))
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "1.50"))  # ex.: 1.50 = +150% do stake
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.50"))  # ex.: 0.50 = 50% do stake
+MAX_STAKE_PCT = float(os.getenv("MAX_STAKE_PCT", "0.01"))  # 1% da banca (mín. 1 USD no risk_manager)
+
 MAX_DAILY_LOSS = 0.10
 MAX_DAILY_TRADES = 20   # máximo de trades por dia
 RISK_PER_TRADE = 0.02
 
 AI_MODE = "AUTO"
 MIN_CONFIDENCE = 0.65
-CANDLE_TF = 60
+# Granularidades Deriv (segundos): M5=300, M15=900
+CANDLE_GRANULARITY_M5 = 300
+CANDLE_GRANULARITY_M15 = 900
 OBI_THRESHOLD = 0.55
 MAX_CONSECUTIVE_LOSS = 5
 TRADE_COOLDOWN = 90     # segundos entre tentativas de trade
@@ -71,8 +82,8 @@ KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.25"))
 KELLY_WINDOW = int(os.getenv("KELLY_WINDOW", "80"))
 # Antes disto, usa RISK_PER_TRADE (aquecimento)
 KELLY_MIN_TRADES = int(os.getenv("KELLY_MIN_TRADES", "12"))
-# Lucro médio por 1 USD de stake em vitória, quando ainda não há vitórias na janela (Deriv ~0.85–0.95 típico)
-KELLY_DEFAULT_WIN_PAYOFF = float(os.getenv("KELLY_DEFAULT_WIN_PAYOFF", "0.90"))
+# Lucro por 1 USD de stake em vitória (modelo binário Kelly); multiplicadores ~1.5 com TP +150% da stake
+KELLY_DEFAULT_WIN_PAYOFF = float(os.getenv("KELLY_DEFAULT_WIN_PAYOFF", "1.5"))
 # p conservador: limite inferior Wilson vs média Beta
 KELLY_USE_WILSON = os.getenv("KELLY_USE_WILSON", "true").strip().lower() in (
     "1",

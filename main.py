@@ -4,6 +4,7 @@ import html
 import logging
 import os
 import signal
+from functools import partial
 from typing import Optional
 
 from aiohttp import web
@@ -30,7 +31,6 @@ class DerivAIBot:
         self.ai = AIEngine()
         self.risk = RiskManager()
         self.tg = TelegramInterface(self, notifier=self.notifier)
-        self.candles: list = []
         self._stop = asyncio.Event()
         self.state = {
             "running": bool(config.AUTO_START_TRADING),
@@ -63,7 +63,7 @@ class DerivAIBot:
             await self.notifier.send(
                 f"🤖 <b>Deriv AI — VPS</b>\n"
                 f"💰 Saldo: {self.deriv.balance:.2f} USD\n"
-                f"🧠 Modo: {config.AI_MODE}\n"
+                f"🧠 Motor: Sniper multiplicadores (M15+M5)\n"
                 f"💹 Ativo: {config.ACTIVE_SYMBOL}\n"
                 f"▶️ Operação automática: <b>{auto}</b> (env <code>AUTO_START_TRADING</code>)\n"
                 f"WebSocket ativo. Use /start ou o menu para controlar."
@@ -121,8 +121,13 @@ class DerivAIBot:
         }
         deriv_symbol = symbols_map.get(symbol, "R_75")
         try:
-            self.candles = await self.deriv.get_candles(
-                deriv_symbol, count=200, tf=config.CANDLE_TF
+            candles_m15, candles_m5 = await asyncio.gather(
+                self.deriv.get_candles(
+                    deriv_symbol, count=200, tf=config.CANDLE_GRANULARITY_M15
+                ),
+                self.deriv.get_candles(
+                    deriv_symbol, count=200, tf=config.CANDLE_GRANULARITY_M5
+                ),
             )
         except DerivClientError as e:
             logger.warning("get_candles: %s", e)
@@ -132,15 +137,17 @@ class DerivAIBot:
             except Exception as ex:
                 logger.warning("ensure_connected: %s", ex)
             return False
-        if not self.candles:
+        if not candles_m15 or not candles_m5:
             return False
-        latest_price = float(self.candles[-1]["close"])
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, self.ai.analyze, self.candles, latest_price
+        latest_price = float(candles_m5[-1]["close"])
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            partial(self.ai.analyze, candles_m15, candles_m5, latest_price),
         )
         self.state["last_signal"] = result["signal"]
         self.state["last_confidence"] = result["confidence"]
-        self.state["ai_mode"] = result["mode"]
+        self.state["ai_mode"] = result.get("mode", "SNIPER")
         if result["signal"] == "WAIT":
             return False
         can, reason = self.risk.can_trade(result["confidence"])
@@ -179,20 +186,59 @@ class DerivAIBot:
         )
         await self.tg.send_alert(trade_info)
         try:
-            buy_result = await self.deriv.buy_contract(
-                result["signal"], stake, config.DURATION, deriv_symbol
+            placed = await self.deriv.buy_multiplier_execute(
+                result["signal"], stake, deriv_symbol
             )
         except DerivClientError as e:
-            await self.notifier.error("buy_contract", e)
+            await self.notifier.error("buy_multiplier_execute", e)
             await self.deriv.ensure_connected()
             return False
+        if not placed:
+            return False
+        contract_id, buy_price = placed
+        buy_result = None
+        try:
+            buy_result = await asyncio.wait_for(
+                self.deriv.wait_for_result(contract_id, buy_price),
+                timeout=config.GHOST_TRADE_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timeout de segurança aguardando WS (contract_id=%s) — consultando profit_table",
+                contract_id,
+            )
+            buy_result = await self.deriv.get_contract_result(contract_id, buy_price)
+            if buy_result.get("settled"):
+                logger.info(
+                    "Contrato %s encontrado em profit_table após timeout",
+                    contract_id,
+                )
+            else:
+                self.risk.record_ghost_trade_release(contract_id, stake)
+                buy_result = {
+                    "contract_id": contract_id,
+                    "profit": 0.0,
+                    "won": False,
+                    "buy_price": buy_price,
+                    "ghost": True,
+                }
         if buy_result:
-            won = buy_result.get("profit", 0) > 0
-            pnl = float(buy_result.get("profit", 0))
-            self.risk.record_trade(won, pnl, stake=stake)
+            if buy_result.get("ghost"):
+                won = False
+                pnl = 0.0
+            else:
+                won = buy_result.get("profit", 0) > 0
+                pnl = float(buy_result.get("profit", 0))
+            if not buy_result.get("ghost"):
+                self.risk.record_trade(won, pnl, stake=stake)
             self.state["daily_pnl"] += pnl
             trade_info["won"] = won
             trade_info["pnl"] = pnl
+            if buy_result.get("ghost"):
+                trade_info["reason"] = (
+                    str(trade_info.get("reason", ""))
+                    + " | encerramento: timeout WS (ghost, PnL tratado como 0)"
+                )
             trade_info.update(
                 self.risk.build_trade_summary(balance, self.state["daily_pnl"])
             )

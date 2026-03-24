@@ -1,131 +1,219 @@
 import logging
+from typing import Any, Dict, List, Literal, Optional
 
-import numpy as np
 import pandas as pd
 import ta
 
 import config
 from order_book import OrderBookAnalyzer
-from sr_detector import SRDetector
 
 logger = logging.getLogger(__name__)
 
+MIN_M15 = 40
+MIN_M5 = 35
+
+
+def _ohlc_df(candles: List[Dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame(candles)
+    df.columns = ["epoch", "open", "high", "low", "close"]
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col])
+    n0 = len(df)
+    df.dropna(inplace=True)
+    if len(df) < n0:
+        logger.warning(
+            "ai_engine: %s linha(s) removida(s) após OHLC inválidos",
+            n0 - len(df),
+        )
+    return df
+
 
 class AIEngine:
-    def __init__(self):
+    """
+    Sniper quantitativo em 3 fases: maré M15 → alerta M5 (MACD+RSI) → rompimento BB M5 + OBI.
+    """
+
+    def __init__(self) -> None:
         self.ob = OrderBookAnalyzer(window=100)
-        self.sr = SRDetector(sensitivity=0.001)
-        self.mode = config.AI_MODE
+        self._alert_side: Optional[Literal["MULTUP", "MULTDOWN"]] = None
 
-    def detect_regime(self, df):
-        adx = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
-        adx_val = adx.adx().iloc[-1]
-        atr = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
-        atr_val = atr.iloc[-1]
-        avg_atr = atr.mean()
-        if adx_val > 25:
-            return "TREND"
-        elif atr_val > avg_atr * 1.5:
-            return "SCALP"
-        else:
-            return "SWING"
+    def _m15_tide(self, df: pd.DataFrame) -> Optional[Literal["UP", "DOWN"]]:
+        ema20 = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
+        macd = ta.trend.MACD(df["close"])
+        mline = macd.macd()
+        sig = macd.macd_signal()
+        close = float(df["close"].iloc[-1])
+        em = float(ema20.iloc[-1])
+        mv = float(mline.iloc[-1])
+        sv = float(sig.iloc[-1])
+        if mv > sv and close > em:
+            return "UP"
+        if mv < sv and close < em:
+            return "DOWN"
+        return None
 
-    def analyze(self, candles, latest_tick):
-        if len(candles) < 50:
-            return {"signal": "WAIT", "confidence": 0, "mode": "LOADING", "reason": "Carregando dados"}
-        df = pd.DataFrame(candles)
-        df.columns = ['epoch', 'open', 'high', 'low', 'close']
-        for col in ['open', 'high', 'low', 'close']:
-            df[col] = pd.to_numeric(df[col])
-        _n_before = len(df)
-        df.dropna(inplace=True)
-        if len(df) < _n_before:
-            logger.warning(
-                "ai_engine: %s linha(s) removida(s) após OHLC inválidos (corretora)",
-                _n_before - len(df),
+    def _m5_macd_cross(
+        self, df: pd.DataFrame, favor: Literal["UP", "DOWN"]
+    ) -> bool:
+        macd = ta.trend.MACD(df["close"])
+        mline = macd.macd()
+        sig = macd.macd_signal()
+        mp, sp = float(mline.iloc[-2]), float(sig.iloc[-2])
+        mn, sn = float(mline.iloc[-1]), float(sig.iloc[-1])
+        if favor == "UP":
+            return mp <= sp and mn > sn
+        return mp >= sp and mn < sn
+
+    def _m5_rsi_ok(self, rsi_val: float, favor: Literal["UP", "DOWN"]) -> bool:
+        if favor == "UP":
+            return 48.0 <= rsi_val <= 60.0
+        return 40.0 <= rsi_val <= 52.0
+
+    def _m5_bb_breakout(
+        self, df: pd.DataFrame, side: Literal["MULTUP", "MULTDOWN"]
+    ) -> bool:
+        bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2.0)
+        upper = float(bb.bollinger_hband().iloc[-1])
+        lower = float(bb.bollinger_lband().iloc[-1])
+        close = float(df["close"].iloc[-1])
+        if side == "MULTUP":
+            return close > upper
+        return close < lower
+
+    def analyze(
+        self, candles_m15: List[Dict[str, Any]], candles_m5: List[Dict[str, Any]], latest_tick: float
+    ) -> Dict[str, Any]:
+        wait = {
+            "signal": "WAIT",
+            "confidence": 0.0,
+            "mode": "SNIPER",
+            "reason": "",
+            "phase": "",
+        }
+        if len(candles_m15) < MIN_M15 or len(candles_m5) < MIN_M5:
+            msg = "Carregando velas M15/M5"
+            logger.info("[Sniper] Aguardando M15 — %s", msg)
+            return {**wait, "reason": msg, "phase": "load"}
+
+        df15 = _ohlc_df(candles_m15)
+        df5 = _ohlc_df(candles_m5)
+        if len(df15) < MIN_M15 or len(df5) < MIN_M5:
+            msg = "OHLC insuficiente após limpeza"
+            logger.info("[Sniper] Aguardando M15 — %s", msg)
+            return {**wait, "reason": msg, "phase": "load"}
+
+        self.ob.add_tick(float(latest_tick))
+        obi = float(self.ob.get_obi())
+
+        tide = self._m15_tide(df15)
+        if tide is None:
+            self._alert_side = None
+            msg = "maré M15 indefinida (MACD + EMA20)"
+            logger.info("[Sniper] Fase 1 — Aguardando M15 (%s)", msg)
+            return {**wait, "reason": msg, "phase": "fase1"}
+
+        tide_msg = "maré alta M15" if tide == "UP" else "maré baixa M15"
+        logger.info("[Sniper] Fase 1 — OK (%s); analisando M5", tide_msg)
+
+        rsi5 = ta.momentum.RSIIndicator(df5["close"], window=14).rsi()
+        rsi_now = float(rsi5.iloc[-1])
+
+        favor: Literal["UP", "DOWN"] = tide
+        side: Literal["MULTUP", "MULTDOWN"] = "MULTUP" if tide == "UP" else "MULTDOWN"
+
+        macd5 = ta.trend.MACD(df5["close"])
+        m5_line = macd5.macd()
+        m5_sig = macd5.macd_signal()
+        mn = float(m5_line.iloc[-1])
+        sn = float(m5_sig.iloc[-1])
+        macd_favors = (mn > sn) if favor == "UP" else (mn < sn)
+
+        cross = self._m5_macd_cross(df5, favor)
+        rsi_ok = self._m5_rsi_ok(rsi_now, favor)
+
+        if self._alert_side is not None and self._alert_side != side:
+            self._alert_side = None
+
+        if self._alert_side is None:
+            if not cross or not rsi_ok:
+                msg = "M5 sem cruzamento MACD alinhado ou RSI fora da zona"
+                logger.info(
+                    "[Sniper] Fase 2 — aguardando alerta (%s; RSI=%.2f)",
+                    msg,
+                    rsi_now,
+                )
+                return {**wait, "reason": msg, "phase": "fase2_wait"}
+            self._alert_side = side
+            logger.info(
+                "[Sniper] Fase 2 — Alerta armado %s (cruzamento MACD + RSI=%.2f)",
+                side,
+                rsi_now,
             )
-        self.ob.add_tick(latest_tick)
-        self.sr.detect_levels(df['high'].values, df['low'].values, df['close'].values)
-        active_mode = self.detect_regime(df) if self.mode == "AUTO" else self.mode
-        if active_mode == "TREND":
-            return self._trend_signal(df, latest_tick)
-        elif active_mode == "SCALP":
-            return self._scalp_signal(df, latest_tick)
         else:
-            return self._swing_signal(df, latest_tick)
+            if not rsi_ok or not macd_favors:
+                self._alert_side = None
+                logger.info(
+                    "[Sniper] Fase 2 — alerta cancelado (RSI=%.2f ou MACD desalinhado)",
+                    rsi_now,
+                )
+                return {
+                    **wait,
+                    "reason": "Alerta invalidado (RSI ou MACD M5)",
+                    "phase": "fase2_drop",
+                }
+            logger.info(
+                "[Sniper] Fase 2 — Alerta armado %s (mantido; RSI=%.2f)",
+                self._alert_side,
+                rsi_now,
+            )
 
-    def _trend_signal(self, df, price):
-        ema9 = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator().iloc[-1]
-        ema21 = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator().iloc[-1]
-        ema50 = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator().iloc[-1]
-        adx_ind = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
-        adx = adx_ind.adx().iloc[-1]
-        dip = adx_ind.adx_pos().iloc[-1]
-        dim = adx_ind.adx_neg().iloc[-1]
-        macd = ta.trend.MACD(df['close'])
-        macd_val = macd.macd().iloc[-1]
-        sig_val = macd.macd_signal().iloc[-1]
-        score = 0
-        if ema9 > ema21 > ema50: score += 0.3
-        if adx > 25: score += 0.2
-        if dip > dim: score += 0.2
-        if macd_val > sig_val: score += 0.15
-        if price > ema9: score += 0.15
-        if score >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score, "mode": "TREND", "reason": "EMA+ADX+MACD de alta"}
-        score2 = 0
-        if ema9 < ema21 < ema50: score2 += 0.3
-        if adx > 25: score2 += 0.2
-        if dim > dip: score2 += 0.2
-        if macd_val < sig_val: score2 += 0.15
-        if price < ema9: score2 += 0.15
-        if score2 >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score2, "mode": "TREND", "reason": "EMA+ADX+MACD de baixa"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "TREND", "reason": "Sem sinal"}
+        side = self._alert_side
+        assert side is not None
 
-    def _scalp_signal(self, df, price):
-        rsi = ta.momentum.RSIIndicator(df['close'], window=7).rsi().iloc[-1]
-        obi = self.ob.get_obi()
-        mom = self.ob.get_momentum(5)
-        bb = ta.volatility.BollingerBands(df['close'], window=10)
-        bbl = bb.bollinger_lband().iloc[-1]
-        bbu = bb.bollinger_hband().iloc[-1]
-        score_c = 0
-        score_p = 0
-        if obi > config.OBI_THRESHOLD: score_c += 0.4
-        if rsi < 35: score_c += 0.3
-        if mom > 0: score_c += 0.15
-        if price <= bbl: score_c += 0.15
-        if obi < -config.OBI_THRESHOLD: score_p += 0.4
-        if rsi > 65: score_p += 0.3
-        if mom < 0: score_p += 0.15
-        if price >= bbu: score_p += 0.15
-        if score_c >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score_c, "mode": "SCALP", "reason": "OBI+RSI+BB de alta"}
-        if score_p >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score_p, "mode": "SCALP", "reason": "OBI+RSI+BB de baixa"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "SCALP", "reason": "Sem sinal"}
+        if not self._m5_bb_breakout(df5, side):
+            logger.info(
+                "[Sniper] Fase 3 — em alerta; aguardando rompimento Bollinger (M5)"
+            )
+            return {
+                **wait,
+                "reason": "Alerta ativo — sem rompimento BB ainda",
+                "phase": "fase3_wait_bb",
+            }
 
-    def _swing_signal(self, df, price):
-        rsi = ta.momentum.RSIIndicator(df['close'], window=14).rsi().iloc[-1]
-        stoch = ta.momentum.StochasticOscillator(df['high'], df['low'], df['close'])
-        sk = stoch.stoch().iloc[-1]
-        sr_info = self.sr.is_near_level(price)
-        ema200 = ta.trend.EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1]
-        score_c = 0
-        score_p = 0
-        if rsi < 30: score_c += 0.35
-        if sk < 20: score_c += 0.25
-        if price > ema200: score_c += 0.2
-        if sr_info['near'] and sr_info.get('level', {}).get('type') == 'support':
-            score_c += 0.2
-        if rsi > 70: score_p += 0.35
-        if sk > 80: score_p += 0.25
-        if price < ema200: score_p += 0.2
-        if sr_info['near'] and sr_info.get('level', {}).get('type') == 'resistance':
-            score_p += 0.2
-        if score_c >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score_c, "mode": "SWING", "reason": "RSI+Stoch+SR de alta"}
-        if score_p >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score_p, "mode": "SWING", "reason": "RSI+Stoch+SR de baixa"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "SWING", "reason": "Sem sinal"}
+        if side == "MULTUP":
+            if obi <= 0.0:
+                logger.info(
+                    "[Sniper] Fase 3 — Rompimento detectado mas OBI=%.3f não confirma MULTUP",
+                    obi,
+                )
+                return {
+                    **wait,
+                    "reason": "Rompimento BB sem confirmação OBI (>0)",
+                    "phase": "fase3_obi_block",
+                }
+        else:
+            if obi >= 0.0:
+                logger.info(
+                    "[Sniper] Fase 3 — Rompimento detectado mas OBI=%.3f não confirma MULTDOWN",
+                    obi,
+                )
+                return {
+                    **wait,
+                    "reason": "Rompimento BB sem confirmação OBI (<0)",
+                    "phase": "fase3_obi_block",
+                }
+
+        conf = max(float(config.MIN_CONFIDENCE), 0.82)
+        logger.info(
+            "[Sniper] Fase 3 — Rompimento detectado -> Comprando %s (OBI=%.3f)",
+            side,
+            obi,
+        )
+        self._alert_side = None
+        return {
+            "signal": side,
+            "confidence": conf,
+            "mode": "SNIPER",
+            "reason": f"BB breakout M5 + OBI ({obi:.3f}) alinhado à maré M15",
+            "phase": "fire",
+        }

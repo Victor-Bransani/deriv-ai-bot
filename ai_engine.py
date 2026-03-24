@@ -1,9 +1,15 @@
-import pandas as pd 
-import ta
+import logging
+
 import numpy as np
+import pandas as pd
+import ta
+
+import config
 from order_book import OrderBookAnalyzer
 from sr_detector import SRDetector
-import config
+
+logger = logging.getLogger(__name__)
+
 
 class AIEngine:
     def __init__(self):
@@ -26,11 +32,18 @@ class AIEngine:
 
     def analyze(self, candles, latest_tick):
         if len(candles) < 50:
-            return {"signal": "WAIT", "confidence": 0, "mode": "LOADING", "reason": "Chargement"}
+            return {"signal": "WAIT", "confidence": 0, "mode": "LOADING", "reason": "Carregando dados"}
         df = pd.DataFrame(candles)
         df.columns = ['epoch', 'open', 'high', 'low', 'close']
         for col in ['open', 'high', 'low', 'close']:
             df[col] = pd.to_numeric(df[col])
+        _n_before = len(df)
+        df.dropna(inplace=True)
+        if len(df) < _n_before:
+            logger.warning(
+                "ai_engine: %s linha(s) removida(s) após OHLC inválidos (corretora)",
+                _n_before - len(df),
+            )
         self.ob.add_tick(latest_tick)
         self.sr.detect_levels(df['high'].values, df['low'].values, df['close'].values)
         active_mode = self.detect_regime(df) if self.mode == "AUTO" else self.mode
@@ -59,7 +72,7 @@ class AIEngine:
         if macd_val > sig_val: score += 0.15
         if price > ema9: score += 0.15
         if score >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score, "mode": "TREND", "reason": "EMA+ADX+MACD haussier"}
+            return {"signal": "CALL", "confidence": score, "mode": "TREND", "reason": "EMA+ADX+MACD de alta"}
         score2 = 0
         if ema9 < ema21 < ema50: score2 += 0.3
         if adx > 25: score2 += 0.2
@@ -67,8 +80,8 @@ class AIEngine:
         if macd_val < sig_val: score2 += 0.15
         if price < ema9: score2 += 0.15
         if score2 >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score2, "mode": "TREND", "reason": "EMA+ADX+MACD baissier"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "TREND", "reason": "Pas de signal"}
+            return {"signal": "PUT", "confidence": score2, "mode": "TREND", "reason": "EMA+ADX+MACD de baixa"}
+        return {"signal": "WAIT", "confidence": 0, "mode": "TREND", "reason": "Sem sinal"}
 
     def _scalp_signal(self, df, price):
         rsi = ta.momentum.RSIIndicator(df['close'], window=7).rsi().iloc[-1]
@@ -88,10 +101,10 @@ class AIEngine:
         if mom < 0: score_p += 0.15
         if price >= bbu: score_p += 0.15
         if score_c >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score_c, "mode": "SCALP", "reason": "OBI+RSI+BB haussier"}
+            return {"signal": "CALL", "confidence": score_c, "mode": "SCALP", "reason": "OBI+RSI+BB de alta"}
         if score_p >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score_p, "mode": "SCALP", "reason": "OBI+RSI+BB baissier"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "SCALP", "reason": "Pas de signal"}
+            return {"signal": "PUT", "confidence": score_p, "mode": "SCALP", "reason": "OBI+RSI+BB de baixa"}
+        return {"signal": "WAIT", "confidence": 0, "mode": "SCALP", "reason": "Sem sinal"}
 
     def _swing_signal(self, df, price):
         rsi = ta.momentum.RSIIndicator(df['close'], window=14).rsi().iloc[-1]
@@ -112,7 +125,7 @@ class AIEngine:
         if sr_info['near'] and sr_info.get('level', {}).get('type') == 'resistance':
             score_p += 0.2
         if score_c >= config.MIN_CONFIDENCE:
-            return {"signal": "CALL", "confidence": score_c, "mode": "SWING", "reason": "RSI+Stoch+SR haussier"}
+            return {"signal": "CALL", "confidence": score_c, "mode": "SWING", "reason": "RSI+Stoch+SR de alta"}
         if score_p >= config.MIN_CONFIDENCE:
-            return {"signal": "PUT", "confidence": score_p, "mode": "SWING", "reason": "RSI+Stoch+SR baissier"}
-        return {"signal": "WAIT", "confidence": 0, "mode": "SWING", "reason": "Pas de signal"}
+            return {"signal": "PUT", "confidence": score_p, "mode": "SWING", "reason": "RSI+Stoch+SR de baixa"}
+        return {"signal": "WAIT", "confidence": 0, "mode": "SWING", "reason": "Sem sinal"}

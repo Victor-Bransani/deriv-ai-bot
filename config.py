@@ -37,6 +37,11 @@ GHOST_TRADE_TIMEOUT_SEC = float(os.getenv("GHOST_TRADE_TIMEOUT_SEC", "3600"))
 # Opcional: URL POST JSON para alertas (Discord/n8n/etc.)
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "").strip()
 
+# Operário → Gestor central (telegram_manager.py) — alertas para o Telegram
+MANAGER_WEBHOOK_URL = os.getenv(
+    "MANAGER_WEBHOOK_URL", "http://localhost:8000/alert"
+).strip()
+
 # Na VPS: true = já busca sinais sem precisar apertar Iniciar no Telegram
 AUTO_START_TRADING = os.getenv("AUTO_START_TRADING", "false").strip().lower() in (
     "1",

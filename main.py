@@ -17,7 +17,6 @@ from ai_engine import AIEngine
 from deriv_client import DerivClient, DerivClientError
 from notifier import Notifier
 from risk_manager import RiskManager
-from telegram_bot import TelegramInterface
 from tick_csv_logger import CycleCsvWriter, TickCsvWriter
 
 logger = logging.getLogger("deriv_ai_bot")
@@ -66,7 +65,6 @@ class DerivAIBot:
         self.deriv = DerivClient()
         self.ai = AIEngine()
         self.risk = RiskManager()
-        self.tg = TelegramInterface(self, notifier=self.notifier)
         self._stop = asyncio.Event()
         self._last_idle_log_mono: float = 0.0
         self._tick_queue: Optional[asyncio.Queue] = None
@@ -149,8 +147,6 @@ class DerivAIBot:
         self.risk.set_balance(self.deriv.balance)
         self.risk.ensure_day_opening_balance(self.deriv.balance)
 
-        self.notifier.bind_telegram(self.tg.telegram_sender())
-
         if config.CYCLE_CSV_ENABLED:
             self._cycle_writer = CycleCsvWriter(config.DATA_DIR)
             logger.info("CSV de ciclos (features): %s", config.DATA_DIR.resolve())
@@ -173,31 +169,25 @@ class DerivAIBot:
             except Exception as e:
                 logger.warning("Subscrição de ticks para CSV falhou: %s", e)
 
-        async with self.tg.app:
-            await self.tg.app.start()
-            await self.tg.app.updater.start_polling()
+        auto = "ligada" if config.AUTO_START_TRADING else "desligada"
+        await self.notifier.send(
+            f"🤖 <b>Deriv AI — operário</b>\n"
+            f"💰 Saldo: {self.deriv.balance:.2f} USD\n"
+            f"🧠 Motor: Sniper multiplicadores (M15+M5)\n"
+            f"💹 Ativo: <b>{self.state['symbol']}</b>\n"
+            f"▶️ Operação automática: <b>{auto}</b> (<code>AUTO_START_TRADING</code>)\n"
+            f"🔌 WS Deriv ligado · HTTP local: POST <code>/start</code> e <code>/stop</code>"
+        )
 
-            auto = "ligada" if config.AUTO_START_TRADING else "desligada"
-            await self.notifier.send(
-                f"🤖 <b>Deriv AI — VPS</b>\n"
-                f"💰 Saldo: {self.deriv.balance:.2f} USD\n"
-                f"🧠 Motor: Sniper multiplicadores (M15+M5)\n"
-                f"💹 Ativo: {config.ACTIVE_SYMBOL}\n"
-                f"▶️ Operação automática: <b>{auto}</b> (env <code>AUTO_START_TRADING</code>)\n"
-                f"WebSocket ativo. Use /start ou o menu para controlar."
-            )
-
-            try:
-                await self.trading_loop()
-            finally:
-                if self._tick_consumer_task:
-                    self._tick_consumer_task.cancel()
-                    try:
-                        await self._tick_consumer_task
-                    except asyncio.CancelledError:
-                        pass
-                await self.tg.app.updater.stop()
-                await self.tg.app.stop()
+        try:
+            await self.trading_loop()
+        finally:
+            if self._tick_consumer_task:
+                self._tick_consumer_task.cancel()
+                try:
+                    await self._tick_consumer_task
+                except asyncio.CancelledError:
+                    pass
 
         await self.deriv.disconnect()
 
@@ -218,9 +208,8 @@ class DerivAIBot:
                     ):
                         self._last_idle_log_mono = loop_time
                         logger.info(
-                            "[Estado] Trading automático DESLIGADO — sem análise de mercado nem "
-                            "novas linhas em cycles_*.csv. Use /start no Telegram ou "
-                            "AUTO_START_TRADING=true no .env"
+                            "[Estado] Trading automático DESLIGADO — sem análise nem novas linhas "
+                            "em cycles_*.csv. Use o gestor (Telegram) ou POST /start neste operário."
                         )
                 await asyncio.wait_for(self._stop.wait(), timeout=10.0)
                 break
@@ -323,7 +312,7 @@ class DerivAIBot:
                         "🛑 <b>Pausa por perdas seguidas</b>\n"
                         f"{html.escape(self.risk.pause_reason)}\n\n"
                         "<i>Novas ordens ficam bloqueadas enquanto a pausa estiver ativa. "
-                        "Use /status para ver o motivo. No dia seguinte o contador reinicia "
+                        "Use o gestor /status para ver o motivo. No dia seguinte o contador reinicia "
                         "(meia-noite conforme o relógio do servidor).</i>"
                     )
                 return False
@@ -350,7 +339,7 @@ class DerivAIBot:
             trade_info.update(
                 self.risk.build_trade_summary(balance, self.state["daily_pnl"])
             )
-            await self.tg.send_alert(trade_info)
+            await self.notifier.trade_signal(trade_info)
             try:
                 placed = await self.deriv.buy_multiplier_execute(
                     result["signal"], stake, deriv_symbol
@@ -412,7 +401,7 @@ class DerivAIBot:
                 trade_info.update(
                     self.risk.build_trade_summary(balance, self.state["daily_pnl"])
                 )
-                await self.tg.send_alert(trade_info)
+                await self.notifier.trade_signal(trade_info)
                 hit, tp_sl_reason = self.risk.evaluate_tp_sl(
                     balance, self.state["daily_pnl"]
                 )
@@ -421,7 +410,7 @@ class DerivAIBot:
                     await self.notifier.send(
                         "🛑 <b>Gestão de banca (TP/SL diário)</b>\n"
                         f"{html.escape(tp_sl_reason)}\n\n"
-                        "Trading pausado. Use /bank para rever limites ou /start após ajustar."
+                        "Trading pausado neste operário. Ajuste limites ou POST /start."
                     )
             return True
         finally:
@@ -434,26 +423,66 @@ class DerivAIBot:
                 )
 
 
-async def health_server() -> None:
-    async def handle(request):
-        return web.Response(text="Bot operacional")
-
+def _build_worker_app(bot: DerivAIBot) -> web.Application:
     app = web.Application()
-    app.router.add_get("/", handle)
-    app.router.add_get("/health", handle)
+    app["bot"] = bot
+
+    async def handle_root(_request: web.Request) -> web.Response:
+        return web.Response(text="Deriv AI operacional")
+
+    async def handle_health(_request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    async def handle_status(request: web.Request) -> web.Response:
+        b: DerivAIBot = request.app["bot"]
+        st = b.state
+        return web.json_response(
+            {
+                "symbol": st["symbol"],
+                "running": st["running"],
+                "balance": st["balance"],
+                "daily_pnl": st["daily_pnl"],
+                "last_signal": st["last_signal"],
+            }
+        )
+
+    async def handle_stop(request: web.Request) -> web.Response:
+        b: DerivAIBot = request.app["bot"]
+        b.state["running"] = False
+        return web.Response(status=200, text="stopped")
+
+    async def handle_start(request: web.Request) -> web.Response:
+        b: DerivAIBot = request.app["bot"]
+        b.state["running"] = True
+        return web.Response(status=200, text="started")
+
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/status", handle_status)
+    app.router.add_post("/stop", handle_stop)
+    app.router.add_post("/start", handle_start)
+    return app
+
+
+async def start_worker_http(bot: DerivAIBot) -> web.AppRunner:
+    app = _build_worker_app(bot)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info("HTTP health em 0.0.0.0:%s (/ e /health)", port)
+    logger.info(
+        "HTTP operário 0.0.0.0:%s — GET /status POST /start /stop (/ /health)",
+        port,
+    )
+    return runner
 
 
 async def main() -> None:
     configure_logging()
     user_settings.load()
-    await health_server()
     bot = DerivAIBot()
+    http_runner = await start_worker_http(bot)
     loop = asyncio.get_running_loop()
 
     def _sig() -> None:
@@ -477,6 +506,8 @@ async def main() -> None:
         except Exception:
             pass
         raise
+    finally:
+        await http_runner.cleanup()
 
 
 if __name__ == "__main__":

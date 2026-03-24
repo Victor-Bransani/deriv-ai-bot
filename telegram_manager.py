@@ -7,10 +7,14 @@ Requer .env com TELEGRAM_TOKEN, CHAT_ID e URLs dos operários (WORKER_V10_URL, .
 from __future__ import annotations
 
 import asyncio
+import csv
 import html
+import json
 import logging
 import os
 import signal
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -42,6 +46,113 @@ def load_workers() -> Dict[str, str]:
 
 
 WORKERS = load_workers()
+
+_ROOT = Path(__file__).resolve().parent
+_DASHBOARD_HTML = _ROOT / "dashboard.html"
+
+
+def dashboard_data_dir() -> Path:
+    """Pasta dos CSV dos operários (cycles_*.csv por dia). Override: DASHBOARD_DATA_DIR."""
+    return Path(os.getenv("DASHBOARD_DATA_DIR", str(config.DATA_DIR))).resolve()
+
+
+def _parse_cycle_row_time_unix(row: Dict[str, str]) -> int:
+    ep = (row.get("m5_epoch") or "").strip()
+    if ep:
+        try:
+            return int(float(ep))
+        except ValueError:
+            pass
+    iso = (row.get("ts_utc_iso") or "").strip()
+    if not iso:
+        return 0
+    try:
+        s = iso.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def collect_trade_markers_from_csv(symbol_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Agrega cycles_YYYY-MM-DD.csv (formato real dos operários).
+    Filtra signal MULTUP/MULTDOWN e opcionalmente symbol_deriv (ex.: R_75).
+    """
+    data_dir = dashboard_data_dir()
+    out: List[Dict[str, Any]] = []
+    if not data_dir.is_dir():
+        return out
+    for path in sorted(data_dir.glob("cycles_*.csv")):
+        try:
+            with path.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    sig = (row.get("signal") or "").strip().upper()
+                    if sig not in ("MULTUP", "MULTDOWN"):
+                        continue
+                    deriv = (row.get("symbol_deriv") or "").strip()
+                    if symbol_filter and deriv != symbol_filter:
+                        continue
+                    t = _parse_cycle_row_time_unix(row)
+                    if t <= 0:
+                        continue
+                    if sig == "MULTUP":
+                        out.append(
+                            {
+                                "time": t,
+                                "position": "belowBar",
+                                "color": "green",
+                                "shape": "arrowUp",
+                                "text": "MULTUP",
+                                "symbol": deriv,
+                            }
+                        )
+                    else:
+                        out.append(
+                            {
+                                "time": t,
+                                "position": "aboveBar",
+                                "color": "red",
+                                "shape": "arrowDown",
+                                "text": "MULTDOWN",
+                                "symbol": deriv,
+                            }
+                        )
+        except Exception as e:
+            logger.warning("Ler CSV %s: %s", path, e)
+    out.sort(key=lambda x: x["time"])
+    return out[-400:]
+
+
+async def handle_dashboard(_request: web.Request) -> web.Response:
+    try:
+        raw = _DASHBOARD_HTML.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return web.Response(status=404, text="dashboard.html não encontrado na raiz do projeto.")
+    except Exception as e:
+        logger.exception("Falha ao ler dashboard: %s", e)
+        return web.Response(status=500, text="Erro ao ler dashboard.")
+    boot = (
+        "<script>window.__DERIV__="
+        + json.dumps(
+            {
+                "appId": str(config.DERIV_APP_ID).strip(),
+                "token": (config.DERIV_TOKEN or "").strip(),
+            }
+        )
+        + ";</script>"
+    )
+    html_out = raw.replace("<!--DERIV_CONFIG-->", boot)
+    return web.Response(text=html_out, content_type="text/html", charset="utf-8")
+
+
+async def handle_api_trades(request: web.Request) -> web.Response:
+    sym = request.rel_url.query.get("symbol", "").strip()
+    markers = collect_trade_markers_from_csv(sym if sym else None)
+    return web.json_response(markers)
 
 
 def _chat_allowed(update: Update) -> bool:
@@ -250,12 +361,17 @@ async def run_manager() -> None:
     web_app = web.Application()
     web_app["tg_app"] = tg_app
     web_app.router.add_post("/alert", handle_alert)
+    web_app.router.add_get("/dashboard", handle_dashboard)
+    web_app.router.add_get("/api/trades", handle_api_trades)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info("Gestor HTTP em 0.0.0.0:%s POST /alert", port)
+    logger.info(
+        "Gestor HTTP 0.0.0.0:%s — POST /alert · GET /dashboard · GET /api/trades",
+        port,
+    )
 
     await tg_app.updater.start_polling(drop_pending_updates=True)
     logger.info("Telegram polling ativo. WORKERS=%s", WORKERS)

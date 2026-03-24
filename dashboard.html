@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deriv — Dashboard M5</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet" />
+  <!--DERIV_CONFIG-->
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --success: #3fb950;
+      --danger: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      background-image:
+        radial-gradient(ellipse 120% 80% at 50% -20%, rgba(88, 166, 255, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 100%, rgba(63, 185, 80, 0.06), transparent);
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(22, 27, 34, 0.85);
+      backdrop-filter: blur(8px);
+    }
+    h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    h1 span.dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 12px var(--success);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    select {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.875rem;
+      padding: 0.5rem 2rem 0.5rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238b949e' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.6rem center;
+    }
+    select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+    #status {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.75rem;
+      color: var(--muted);
+      max-width: 420px;
+      line-height: 1.4;
+    }
+    #status.err { color: var(--danger); }
+    #status.ok { color: var(--success); }
+    main {
+      padding: 1rem 1.5rem 1.5rem;
+    }
+    #chart-wrap {
+      height: calc(100vh - 88px);
+      min-height: 420px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      background: #131722;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+    #chart { width: 100%; height: 100%; }
+    footer {
+      padding: 0.5rem 1.5rem;
+      font-size: 0.7rem;
+      color: var(--muted);
+      font-family: "JetBrains Mono", monospace;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="dot" id="ws-dot"></span> Real-Time M5</h1>
+    <div class="controls">
+      <div>
+        <label for="symbol">Mercado</label><br />
+        <select id="symbol">
+          <option value="R_10">R_10 (V10)</option>
+          <option value="R_25">R_25 (V25)</option>
+          <option value="R_50">R_50 (V50)</option>
+          <option value="R_75" selected>R_75 (V75)</option>
+        </select>
+      </div>
+    </div>
+    <p id="status">A ligar…</p>
+  </header>
+  <main>
+    <div id="chart-wrap"><div id="chart"></div></div>
+  </main>
+  <footer>Lightweight Charts · WebSocket Deriv · Trades via /api/trades (5s)</footer>
+
+  <script>
+(function () {
+  const cfg = window.__DERIV__ || { appId: "1089", token: "" };
+  const statusEl = document.getElementById("status");
+  const wsDot = document.getElementById("ws-dot");
+  const symbolSelect = document.getElementById("symbol");
+
+  function setStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = cls || "";
+  }
+
+  const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+    layout: {
+      background: { type: "solid", color: "#131722" },
+      textColor: "#b2b5be",
+    },
+    grid: {
+      vertLines: { color: "#2a2e39" },
+      horzLines: { color: "#2a2e39" },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: "#2a2e39" },
+    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false },
+  });
+
+  const series = chart.addCandlestickSeries({
+    upColor: "#26a69a",
+    downColor: "#ef5350",
+    borderVisible: false,
+    wickUpColor: "#26a69a",
+    wickDownColor: "#ef5350",
+  });
+
+  let ws = null;
+  let reqId = 1;
+  let tradePoll = null;
+
+  function nextId() { return reqId++; }
+
+  function parseNum(v) {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function candleToBar(c) {
+    const t = parseInt(c.epoch, 10);
+    if (!Number.isFinite(t)) return null;
+    const time = t > 1e12 ? Math.floor(t / 1000) : t;
+    const o = parseNum(c.open);
+    const h = parseNum(c.high);
+    const l = parseNum(c.low);
+    const cl = parseNum(c.close);
+    if (![o, h, l, cl].every(Number.isFinite)) return null;
+    return { time, open: o, high: h, low: l, close: cl };
+  }
+
+  function applyCandles(candles) {
+    if (!Array.isArray(candles) || !candles.length) return;
+    const bars = candles.map(candleToBar).filter(Boolean);
+    bars.sort((a, b) => a.time - b.time);
+    const seen = new Map();
+    for (const b of bars) seen.set(b.time, b);
+    const merged = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+    series.setData(merged);
+    chart.timeScale().fitContent();
+  }
+
+  function handleOhlc(ohlc) {
+    if (!ohlc) return;
+    if (ohlc.symbol && symbolSelect.value && ohlc.symbol !== symbolSelect.value) return;
+    const ep = ohlc.open_time != null ? ohlc.open_time : ohlc.epoch;
+    const bar = candleToBar({
+      epoch: ep,
+      open: ohlc.open,
+      high: ohlc.high,
+      low: ohlc.low,
+      close: ohlc.close,
+    });
+    if (bar) series.update(bar);
+  }
+
+  function send(obj) {
+    const id = nextId();
+    const payload = Object.assign({}, obj, { req_id: id });
+    ws.send(JSON.stringify(payload));
+    return id;
+  }
+
+  function subscribeHistory(sym) {
+    send({
+      ticks_history: sym,
+      end: "latest",
+      count: 300,
+      style: "candles",
+      granularity: 300,
+      subscribe: 1,
+    });
+  }
+
+  function connect(sym) {
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+      ws = null;
+    }
+    wsDot.style.background = "#8b949e";
+    wsDot.style.boxShadow = "none";
+
+    const url = "wss://ws.binaryws.com/websockets/v3?app_id=" + encodeURIComponent(cfg.appId || "1089");
+    ws = new WebSocket(url);
+
+    ws.onopen = function () {
+      setStatus("WebSocket ligado — a autorizar…", "");
+      wsDot.style.background = "#d29922";
+      wsDot.style.boxShadow = "0 0 12px #d29922";
+      if (cfg.token && String(cfg.token).trim()) {
+        send({ authorize: String(cfg.token).trim() });
+      } else {
+        setStatus("Sem DERIV_TOKEN no gestor — a pedir histórico (pode falhar).", "err");
+        subscribeHistory(sym);
+      }
+    };
+
+    ws.onmessage = function (ev) {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.ping !== undefined) {
+        ws.send(JSON.stringify({ pong: msg.ping }));
+        return;
+      }
+      if (msg.error) {
+        setStatus("Deriv: " + (msg.error.message || JSON.stringify(msg.error)), "err");
+        return;
+      }
+      const rid = msg.req_id;
+      if (rid != null && msg.authorize) {
+        setStatus("Autorizado — a subscrever M5 " + sym, "ok");
+        subscribeHistory(sym);
+        return;
+      }
+      if (msg.candles) {
+        applyCandles(msg.candles);
+        setStatus("M5 " + sym + " · " + msg.candles.length + " velas · streaming OHLC", "ok");
+        return;
+      }
+      if (msg.ohlc) {
+        handleOhlc(msg.ohlc);
+        return;
+      }
+    };
+
+    ws.onerror = function () {
+      setStatus("Erro de WebSocket", "err");
+    };
+
+    ws.onclose = function () {
+      wsDot.style.background = "#8b949e";
+      wsDot.style.boxShadow = "none";
+      setStatus("WebSocket fechado", "");
+    };
+  }
+
+  function toChartMarkers(apiRows) {
+    return apiRows.map(function (m) {
+      return {
+        time: m.time,
+        position: m.position,
+        color: m.color,
+        shape: m.shape,
+        text: m.text,
+      };
+    });
+  }
+
+  async function fetchTrades() {
+    const sym = symbolSelect.value;
+    try {
+      const r = await fetch("/api/trades?symbol=" + encodeURIComponent(sym), { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      if (!Array.isArray(data)) return;
+      series.setMarkers(toChartMarkers(data));
+    } catch (e) {
+      console.warn("api/trades", e);
+    }
+  }
+
+  symbolSelect.addEventListener("change", function () {
+    connect(symbolSelect.value);
+  });
+
+  window.addEventListener("resize", function () {
+    chart.applyOptions({ width: document.getElementById("chart").clientWidth, height: document.getElementById("chart").clientHeight });
+  });
+
+  chart.applyOptions({
+    width: document.getElementById("chart").clientWidth,
+    height: document.getElementById("chart").clientHeight,
+  });
+
+  connect(symbolSelect.value);
+  tradePoll = setInterval(fetchTrades, 5000);
+  fetchTrades();
+})();
+  </script>
+</body>
+</html>

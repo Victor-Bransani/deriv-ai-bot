@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -107,3 +108,31 @@ MIN_STAKE = float(os.getenv("MIN_STAKE", "0.35"))
 # TP/SL diário em % da banca na abertura do dia (0 = desligado). Ex.: 0.05 = 5%
 TP_DAILY_PCT = float(os.getenv("TP_DAILY_PCT", "0"))
 SL_DAILY_PCT = float(os.getenv("SL_DAILY_PCT", "0"))
+
+# Dados para ML / auditoria
+DATA_DIR = Path(os.getenv("DATA_DIR", str(_root / "data")))
+TICK_CSV_ENABLED = os.getenv("TICK_CSV_ENABLED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+CYCLE_CSV_ENABLED = os.getenv("CYCLE_CSV_ENABLED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+TICK_QUEUE_MAX = int(os.getenv("TICK_QUEUE_MAX", "100000"))
+
+# Logging: consola + opcional ficheiro rotativo
+LOG_LEVEL = getattr(
+    logging,
+    os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+    logging.INFO,
+)
+BOT_LOG_FILE = (os.getenv("BOT_LOG_FILE", "") or "").strip()
+BOT_LOG_MAX_BYTES = int(os.getenv("BOT_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+BOT_LOG_BACKUP_COUNT = int(os.getenv("BOT_LOG_BACKUP_COUNT", "5"))
+# Intervalo (s) para lembrar que o trading automático está desligado
+IDLE_TRADING_LOG_INTERVAL_SEC = float(os.getenv("IDLE_TRADING_LOG_INTERVAL_SEC", "300"))

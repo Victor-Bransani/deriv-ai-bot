@@ -7,5 +7,6 @@ __pycache__/
 *.py[cod]
 .Python
 *.log
+data/
 deriv-ai-bot-deploy.tgz
 *.tgz

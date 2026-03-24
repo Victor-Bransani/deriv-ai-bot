@@ -37,6 +37,9 @@ class DerivClient:
         self._contract_queues: Dict[int, asyncio.Queue] = {}
         self.balance = 0.0
         self.authorized = False
+        self._tick_queue: Optional[asyncio.Queue] = None
+        self._tick_stream_symbol: Optional[str] = None
+        self._tick_stream_sub_id: Optional[str] = None
 
     def _next_req_id(self) -> int:
         rid = self._req_id
@@ -71,6 +74,7 @@ class DerivClient:
                 pass
         self._reader_task = asyncio.create_task(self._reader_loop(), name="deriv-ws-reader")
         await self.authorize()
+        await self._resubscribe_tick_stream_after_auth()
 
     async def ensure_connected(self) -> None:
         if self._ws and not self._ws.closed and self.authorized:
@@ -135,6 +139,16 @@ class DerivClient:
             logger.error("Deriv WS error (JSON completo): %s", json.dumps(msg, default=str))
             return
 
+        if "tick" in msg:
+            if self._tick_queue is not None:
+                try:
+                    self._tick_queue.put_nowait(msg)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "Fila de ticks cheia — descartando (TICK_QUEUE_MAX / consumo CSV)"
+                    )
+            return
+
         poc = msg.get("proposal_open_contract")
         if isinstance(poc, dict):
             cid = poc.get("contract_id")
@@ -188,6 +202,52 @@ class DerivClient:
         self.authorized = True
         self.balance = float(resp["authorize"].get("balance", 0))
         logger.info("Deriv autorizado. Saldo: %.2f", self.balance)
+
+    def set_tick_queue(self, queue: Optional[asyncio.Queue]) -> None:
+        self._tick_queue = queue
+
+    async def _forget_tick_stream(self) -> None:
+        if not self._tick_stream_sub_id:
+            return
+        sid = self._tick_stream_sub_id
+        self._tick_stream_sub_id = None
+        try:
+            if self._ws and not self._ws.closed and self.authorized:
+                await self._send_request({"forget": sid}, timeout=5)
+        except Exception as e:
+            logger.warning("forget tick stream %s: %s", sid, e)
+
+    async def _resubscribe_tick_stream_after_auth(self) -> None:
+        if not self._tick_stream_symbol or self._tick_queue is None:
+            return
+        try:
+            resp = await self.request(
+                {"ticks": self._tick_stream_symbol, "subscribe": 1}
+            )
+            sub = resp.get("subscription") or {}
+            self._tick_stream_sub_id = sub.get("id")
+            logger.info(
+                "Stream de ticks: %s (subscription id=%s)",
+                self._tick_stream_symbol,
+                self._tick_stream_sub_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "Re-subscrição de ticks falhou (%s): %s",
+                self._tick_stream_symbol,
+                e,
+            )
+
+    async def subscribe_tick_stream(self, symbol: str) -> None:
+        """Subscrição contínua de ticks para gravação / ML (re-subscreve após reconexão)."""
+        await self.ensure_connected()
+        if self._tick_queue is None:
+            raise DerivClientError(
+                "Defina a fila com set_tick_queue() antes de subscribe_tick_stream()"
+            )
+        await self._forget_tick_stream()
+        self._tick_stream_symbol = symbol
+        await self._resubscribe_tick_stream_after_auth()
 
     async def get_candles(self, symbol: str, count: int = 200, tf: int = 60) -> List[Dict[str, Any]]:
         resp = await self.request(
@@ -386,6 +446,7 @@ class DerivClient:
 
     async def disconnect(self) -> None:
         self._closing = True
+        await self._forget_tick_stream()
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             try:

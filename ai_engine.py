@@ -28,6 +28,32 @@ def _ohlc_df(candles: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
+def _empty_diagnostics() -> Dict[str, Any]:
+    return {
+        "m15_tide": "",
+        "m5_epoch": "",
+        "m5_open": "",
+        "m5_high": "",
+        "m5_low": "",
+        "m5_close": "",
+        "m15_epoch": "",
+        "m15_close": "",
+        "rsi_m5": "",
+        "macd_m5_line": "",
+        "macd_m5_signal": "",
+        "macd_cross": "",
+        "macd_favors": "",
+        "rsi_ok": "",
+        "bb_upper": "",
+        "bb_lower": "",
+        "bb_breakout_up": "",
+        "bb_breakout_down": "",
+        "obi": "",
+        "alert_side": "",
+        "latest_tick_used": "",
+    }
+
+
 class AIEngine:
     """
     Sniper quantitativo em 3 fases: maré M15 → alerta M5 (MACD+RSI) → rompimento BB M5 + OBI.
@@ -80,16 +106,35 @@ class AIEngine:
             return close > upper
         return close < lower
 
+    def _fill_ohlc_diag(self, diag: Dict[str, Any], df15: pd.DataFrame, df5: pd.DataFrame) -> None:
+        r5 = df5.iloc[-1]
+        r15 = df15.iloc[-1]
+        diag["m5_epoch"] = int(r5["epoch"])
+        diag["m5_open"] = float(r5["open"])
+        diag["m5_high"] = float(r5["high"])
+        diag["m5_low"] = float(r5["low"])
+        diag["m5_close"] = float(r5["close"])
+        diag["m15_epoch"] = int(r15["epoch"])
+        diag["m15_close"] = float(r15["close"])
+
     def analyze(
-        self, candles_m15: List[Dict[str, Any]], candles_m5: List[Dict[str, Any]], latest_tick: float
+        self,
+        candles_m15: List[Dict[str, Any]],
+        candles_m5: List[Dict[str, Any]],
+        latest_tick: float,
     ) -> Dict[str, Any]:
+        diag = _empty_diagnostics()
+        diag["latest_tick_used"] = float(latest_tick)
+
         wait = {
             "signal": "WAIT",
             "confidence": 0.0,
             "mode": "SNIPER",
             "reason": "",
             "phase": "",
+            "diagnostics": diag,
         }
+
         if len(candles_m15) < MIN_M15 or len(candles_m5) < MIN_M5:
             msg = "Carregando velas M15/M5"
             logger.info("[Sniper] Aguardando M15 — %s", msg)
@@ -102,34 +147,51 @@ class AIEngine:
             logger.info("[Sniper] Aguardando M15 — %s", msg)
             return {**wait, "reason": msg, "phase": "load"}
 
+        self._fill_ohlc_diag(diag, df15, df5)
         self.ob.add_tick(float(latest_tick))
         obi = float(self.ob.get_obi())
+        diag["obi"] = obi
 
-        tide = self._m15_tide(df15)
-        if tide is None:
-            self._alert_side = None
-            msg = "maré M15 indefinida (MACD + EMA20)"
-            logger.info("[Sniper] Fase 1 — Aguardando M15 (%s)", msg)
-            return {**wait, "reason": msg, "phase": "fase1"}
-
-        tide_msg = "maré alta M15" if tide == "UP" else "maré baixa M15"
-        logger.info("[Sniper] Fase 1 — OK (%s); analisando M5", tide_msg)
+        bb = ta.volatility.BollingerBands(df5["close"], window=20, window_dev=2.0)
+        diag["bb_upper"] = float(bb.bollinger_hband().iloc[-1])
+        diag["bb_lower"] = float(bb.bollinger_lband().iloc[-1])
+        c5 = float(df5["close"].iloc[-1])
+        diag["bb_breakout_up"] = c5 > diag["bb_upper"]
+        diag["bb_breakout_down"] = c5 < diag["bb_lower"]
 
         rsi5 = ta.momentum.RSIIndicator(df5["close"], window=14).rsi()
         rsi_now = float(rsi5.iloc[-1])
-
-        favor: Literal["UP", "DOWN"] = tide
-        side: Literal["MULTUP", "MULTDOWN"] = "MULTUP" if tide == "UP" else "MULTDOWN"
+        diag["rsi_m5"] = rsi_now
 
         macd5 = ta.trend.MACD(df5["close"])
         m5_line = macd5.macd()
         m5_sig = macd5.macd_signal()
         mn = float(m5_line.iloc[-1])
         sn = float(m5_sig.iloc[-1])
-        macd_favors = (mn > sn) if favor == "UP" else (mn < sn)
+        diag["macd_m5_line"] = mn
+        diag["macd_m5_signal"] = sn
 
+        tide = self._m15_tide(df15)
+        diag["m15_tide"] = tide if tide else ""
+
+        if tide is None:
+            self._alert_side = None
+            msg = "maré M15 indefinida (MACD + EMA20)"
+            logger.info("[Sniper] Fase 1 — Aguardando M15 (%s)", msg)
+            return {**wait, "reason": msg, "phase": "fase1", "diagnostics": diag}
+
+        tide_msg = "maré alta M15" if tide == "UP" else "maré baixa M15"
+        logger.info("[Sniper] Fase 1 — OK (%s); analisando M5", tide_msg)
+
+        favor: Literal["UP", "DOWN"] = tide
+        side: Literal["MULTUP", "MULTDOWN"] = "MULTUP" if tide == "UP" else "MULTDOWN"
+
+        macd_favors = (mn > sn) if favor == "UP" else (mn < sn)
         cross = self._m5_macd_cross(df5, favor)
         rsi_ok = self._m5_rsi_ok(rsi_now, favor)
+        diag["macd_favors"] = macd_favors
+        diag["macd_cross"] = cross
+        diag["rsi_ok"] = rsi_ok
 
         if self._alert_side is not None and self._alert_side != side:
             self._alert_side = None
@@ -142,7 +204,7 @@ class AIEngine:
                     msg,
                     rsi_now,
                 )
-                return {**wait, "reason": msg, "phase": "fase2_wait"}
+                return {**wait, "reason": msg, "phase": "fase2_wait", "diagnostics": diag}
             self._alert_side = side
             logger.info(
                 "[Sniper] Fase 2 — Alerta armado %s (cruzamento MACD + RSI=%.2f)",
@@ -160,6 +222,7 @@ class AIEngine:
                     **wait,
                     "reason": "Alerta invalidado (RSI ou MACD M5)",
                     "phase": "fase2_drop",
+                    "diagnostics": diag,
                 }
             logger.info(
                 "[Sniper] Fase 2 — Alerta armado %s (mantido; RSI=%.2f)",
@@ -169,6 +232,7 @@ class AIEngine:
 
         side = self._alert_side
         assert side is not None
+        diag["alert_side"] = side
 
         if not self._m5_bb_breakout(df5, side):
             logger.info(
@@ -178,6 +242,7 @@ class AIEngine:
                 **wait,
                 "reason": "Alerta ativo — sem rompimento BB ainda",
                 "phase": "fase3_wait_bb",
+                "diagnostics": diag,
             }
 
         if side == "MULTUP":
@@ -190,6 +255,7 @@ class AIEngine:
                     **wait,
                     "reason": "Rompimento BB sem confirmação OBI (>0)",
                     "phase": "fase3_obi_block",
+                    "diagnostics": diag,
                 }
         else:
             if obi >= 0.0:
@@ -201,6 +267,7 @@ class AIEngine:
                     **wait,
                     "reason": "Rompimento BB sem confirmação OBI (<0)",
                     "phase": "fase3_obi_block",
+                    "diagnostics": diag,
                 }
 
         conf = max(float(config.MIN_CONFIDENCE), 0.82)
@@ -216,4 +283,5 @@ class AIEngine:
             "mode": "SNIPER",
             "reason": f"BB breakout M5 + OBI ({obi:.3f}) alinhado à maré M15",
             "phase": "fire",
+            "diagnostics": diag,
         }

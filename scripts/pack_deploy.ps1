@@ -8,6 +8,11 @@ tar.exe -czvf $Out `
   --exclude=".venv" `
   --exclude="__pycache__" `
   --exclude="*.pyc" `
+  --exclude="node_modules" `
+  --exclude="web/node_modules" `
+  --exclude="web/dist" `
+  --exclude="data" `
+  --exclude=".env" `
   .
 Write-Host "Criado: $Out"
 Write-Host "Enviar: scp `"$Out`" root@SEU_IP:/root/"

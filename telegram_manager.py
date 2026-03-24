@@ -48,7 +48,7 @@ def load_workers() -> Dict[str, str]:
 WORKERS = load_workers()
 
 _ROOT = Path(__file__).resolve().parent
-_DASHBOARD_HTML = _ROOT / "dashboard.html"
+_DASHBOARD_HTML = _ROOT / "static" / "dashboard.html"
 
 
 def dashboard_data_dir() -> Path:
@@ -131,7 +131,7 @@ async def handle_dashboard(_request: web.Request) -> web.Response:
     try:
         raw = _DASHBOARD_HTML.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return web.Response(status=404, text="dashboard.html não encontrado na raiz do projeto.")
+        return web.Response(status=404, text="static/dashboard.html não encontrado no projeto.")
     except Exception as e:
         logger.exception("Falha ao ler dashboard: %s", e)
         return web.Response(status=500, text="Erro ao ler dashboard.")

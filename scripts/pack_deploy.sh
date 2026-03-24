@@ -10,5 +10,10 @@ tar -czvf "$OUT" \
   --exclude=".venv" \
   --exclude="__pycache__" \
   --exclude="*.pyc" \
+  --exclude="node_modules" \
+  --exclude="web/node_modules" \
+  --exclude="web/dist" \
+  --exclude="data" \
+  --exclude=".env" \
   .
 echo "Criado: $OUT"

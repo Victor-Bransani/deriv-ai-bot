@@ -1,12 +1,58 @@
+# --- Segredos e estado local ---
 .env
+.env.*
+!env.example
 env.txt
 user_settings.json
+
+# --- Python ---
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .Python
+*.egg-info/
+.eggs/
+
+# --- Node / frontend ---
+node_modules/
+
+# --- Build e caches ---
+dist/
+dist-ssr/
+*.tsbuildinfo
+coverage/
+.vite/
+
+# --- Logs ---
+logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Dados e pacotes de deploy ---
 data/
-deriv-ai-bot-deploy.tgz
 *.tgz
+
+# --- OS e editores ---
+.DS_Store
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.local
+
+# VS Code: ignorar tudo exceto extensões partilhadas
+.vscode/*
+!.vscode/extensions.json
+
+# --- Playwright ---
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
